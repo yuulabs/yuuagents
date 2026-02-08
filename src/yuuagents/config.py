@@ -1,36 +1,39 @@
-"""TOML configuration for yuuagents daemon — msgspec-based."""
+"""YAML configuration for yagents daemon — msgspec-based."""
 
 from __future__ import annotations
 
-import tomllib
+import copy
 from pathlib import Path
+from typing import Any
 
 import msgspec
+import yaml
 
-_DEFAULT_CONFIG_PATH = Path("~/.config/yagents/config.toml")
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+YAGENTS_HOME = Path("~/.yagents").expanduser()
+DEFAULT_CONFIG_PATH = YAGENTS_HOME / "config.yaml"
+
+# Project-level config files (relative to repo root).
+_PROJECT_CONFIG_NAME = "config.example.yaml"
+_PROJECT_OVERRIDES_NAME = "config.overrides.yaml"
+
+# ---------------------------------------------------------------------------
+# Config structs
+# ---------------------------------------------------------------------------
 
 
 class DaemonConfig(msgspec.Struct, kw_only=True):
-    socket: str = "~/.local/run/yagents.sock"
+    socket: str = "~/.yagents/yagents.sock"
+    log_level: str = "info"
 
 
 class DockerConfig(msgspec.Struct, kw_only=True):
-    """Default container setup.
-
-    The daemon creates one shared container on startup:
-    - host ``/`` is bind-mounted read-only to ``/mnt/host``
-    - host ``~/.yuuagents/dockers/<container-id>`` is bind-mounted
-      read-write to ``/root`` inside the container
-    """
+    """Default container setup."""
 
     image: str = "ubuntu:24.04"
-
-
-class LLMConfig(msgspec.Struct, kw_only=True):
-    provider: str = "openai"
-    api_key_env: str = "OPENAI_API_KEY"
-    default_model: str = "gpt-4o"
-    base_url: str = ""
 
 
 class SkillsConfig(msgspec.Struct, kw_only=True):
@@ -41,8 +44,47 @@ class TavilyConfig(msgspec.Struct, kw_only=True):
     api_key_env: str = "TAVILY_API_KEY"
 
 
-class PersonaConfig(msgspec.Struct, kw_only=True):
-    system_prompt: str = ""
+class PricingEntry(msgspec.Struct, kw_only=True):
+    """Per-model pricing override (USD per million tokens)."""
+
+    model: str
+    input_mtok: float = 0.0
+    output_mtok: float = 0.0
+    cache_read_mtok: float = 0.0
+    cache_write_mtok: float = 0.0
+
+
+class ProviderConfig(msgspec.Struct, kw_only=True):
+    """LLM provider configuration.
+
+    ``kind`` selects the wire protocol:
+    - ``"openai"``    → OpenAIChatCompletionProvider
+    - ``"anthropic"`` → AnthropicMessagesProvider
+
+    Provider-specific fields (``base_url``, ``organization``) are passed
+    through to the underlying SDK.
+    """
+
+    kind: str = "openai"
+    api_key_env: str = "OPENAI_API_KEY"
+    default_model: str = "gpt-4o"
+    # Provider-specific
+    base_url: str = ""
+    organization: str = ""  # OpenAI only
+    # Inline pricing overrides
+    pricing: list[PricingEntry] = msgspec.field(default_factory=list)
+
+
+class AgentEntry(msgspec.Struct, kw_only=True):
+    """Per-agent configuration.
+
+    Each agent references a named provider from ``providers:`` and may
+    override the model, persona, tools, and skills.
+    """
+
+    provider: str = ""
+    model: str = ""
+    persona: str = ""
     tools: list[str] = msgspec.field(default_factory=list)
     skills: list[str] = msgspec.field(default_factory=list)
 
@@ -50,22 +92,92 @@ class PersonaConfig(msgspec.Struct, kw_only=True):
 class Config(msgspec.Struct, kw_only=True):
     daemon: DaemonConfig = msgspec.field(default_factory=DaemonConfig)
     docker: DockerConfig = msgspec.field(default_factory=DockerConfig)
-    llm: LLMConfig = msgspec.field(default_factory=LLMConfig)
     skills: SkillsConfig = msgspec.field(default_factory=SkillsConfig)
     tavily: TavilyConfig = msgspec.field(default_factory=TavilyConfig)
-    personas: dict[str, PersonaConfig] = msgspec.field(default_factory=dict)
+    providers: dict[str, ProviderConfig] = msgspec.field(default_factory=dict)
+    agents: dict[str, AgentEntry] = msgspec.field(default_factory=dict)
 
     @property
     def socket_path(self) -> Path:
         return Path(self.daemon.socket).expanduser()
 
+    def validate(self) -> list[str]:
+        """Check referential integrity.  Returns a list of error messages."""
+        errors: list[str] = []
+        for agent_name, entry in self.agents.items():
+            if entry.provider and entry.provider not in self.providers:
+                errors.append(
+                    f"agents.{agent_name}.provider references unknown "
+                    f"provider {entry.provider!r}"
+                )
+        return errors
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge *override* into a **copy** of *base*.
+
+    - dict values are merged recursively.
+    - All other types in *override* replace the value in *base*.
+    """
+    result = copy.deepcopy(base)
+    for key, val in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = copy.deepcopy(val)
+    return result
+
+
+def find_project_root(start: Path | None = None) -> Path | None:
+    """Walk up from *start* (default: cwd) looking for a directory that
+    contains ``config.example.yaml``.  Returns ``None`` if not found.
+    """
+    current = (start or Path.cwd()).resolve()
+    for parent in [current, *current.parents]:
+        if (parent / _PROJECT_CONFIG_NAME).exists():
+            return parent
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Load
+# ---------------------------------------------------------------------------
+
 
 def load(path: str | Path | None = None) -> Config:
-    """Load and validate config from TOML. Returns defaults if file missing."""
-    p = Path(path) if path else _DEFAULT_CONFIG_PATH.expanduser()
+    """Load and validate config from YAML.  Returns defaults if file missing."""
+    p = Path(path) if path else DEFAULT_CONFIG_PATH
     if not p.exists():
         return Config()
-    raw = p.read_bytes()
-    # tomllib parses TOML → dict, then msgspec validates + converts
-    data = tomllib.loads(raw.decode("utf-8"))
+    text = p.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    if not data:
+        return Config()
     return msgspec.convert(data, Config)
+
+
+def load_merged(
+    base_path: str | Path,
+    overrides_path: str | Path | None = None,
+) -> Config:
+    """Load *base_path*, optionally deep-merge *overrides_path* on top,
+    and return the resulting ``Config``.
+    """
+    base_p = Path(base_path)
+    if not base_p.exists():
+        raise FileNotFoundError(f"Base config not found: {base_p}")
+
+    base_data = yaml.safe_load(base_p.read_text(encoding="utf-8")) or {}
+
+    if overrides_path:
+        over_p = Path(overrides_path)
+        if over_p.exists():
+            over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+            base_data = _deep_merge(base_data, over_data)
+
+    return msgspec.convert(base_data, Config)

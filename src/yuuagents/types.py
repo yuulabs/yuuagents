@@ -30,9 +30,18 @@ class ErrorInfo(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class TaskRequest(msgspec.Struct, frozen=True, kw_only=True):
-    """Payload for POST /api/agents."""
+    """Payload for POST /api/agents.
 
-    persona: str
+    ``agent`` selects a named agent configuration (provider, model, tools,
+    skills, persona).  Defaults to ``"main"``.
+
+    ``persona`` optionally overrides the system prompt from the agent config.
+    If empty, the persona from the agent config is used.  If no agent config
+    matches, ``persona`` is used as-is.
+    """
+
+    agent: str = "main"
+    persona: str = ""
     task: str
     tools: list[str] = []
     skills: list[str] = []

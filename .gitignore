@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local config overrides (may contain secrets / personal preferences)
+config.overrides.toml

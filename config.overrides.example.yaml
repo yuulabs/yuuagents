@@ -1,0 +1,55 @@
+# ============================================================================
+# yagents — Configuration Overrides (EXAMPLE)
+# ============================================================================
+#
+# Copy this file to `config.overrides.yaml` (same directory) and edit it.
+# When you run `yagents setup`, overrides are deep-merged on top of the
+# default config.example.yaml before writing to ~/.yagents/config.yaml.
+#
+# Only include the settings you want to change — everything else inherits
+# from config.example.yaml.
+#
+# This file is gitignored by default so your local settings stay private.
+# ============================================================================
+
+# Example: use Anthropic instead of (or in addition to) OpenAI
+# providers:
+#   anthropic-main:
+#     kind: anthropic
+#     api_key_env: ANTHROPIC_API_KEY
+#     default_model: claude-sonnet-4-20250514
+#     pricing:
+#       - model: claude-sonnet-4-20250514
+#         input_mtok: 3.00
+#         output_mtok: 15.00
+#         cache_read_mtok: 0.30
+#         cache_write_mtok: 3.75
+
+# Example: point main agent to Anthropic
+# agents:
+#   main:
+#     provider: anthropic-main
+#     model: claude-sonnet-4-20250514
+
+# Example: use a custom Docker image with your toolchain pre-installed
+# docker:
+#   image: my-dev-image:latest
+
+# Example: add extra skill directories
+# skills:
+#   paths:
+#     - ~/.yagents/skills
+#     - ~/my-project/.skills
+
+# Example: define a custom agent
+# agents:
+#   devops:
+#     provider: openai-default
+#     model: gpt-4o
+#     persona: >
+#       You are a DevOps engineer specializing in CI/CD and infrastructure.
+#     tools:
+#       - execute_bash
+#       - read_file
+#       - write_file
+#       - web_search

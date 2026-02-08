@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import msgspec
 import pytest
 
 from yuuagents.config import (
+    AgentEntry,
     Config,
     DaemonConfig,
     DockerConfig,
-    LLMConfig,
-    PersonaConfig,
+    PricingEntry,
+    ProviderConfig,
     SkillsConfig,
     TavilyConfig,
+    _deep_merge,
     load,
+    load_merged,
 )
 
 
@@ -24,71 +26,39 @@ class TestDaemonConfig:
     """Tests for DaemonConfig struct."""
 
     def test_default_values(self) -> None:
-        """Should have correct defaults."""
         cfg = DaemonConfig()
-        assert cfg.socket == "~/.local/run/yagents.sock"
+        assert cfg.socket == "~/.yagents/yagents.sock"
+        assert cfg.log_level == "info"
 
     def test_custom_socket(self) -> None:
-        """Should accept custom socket path."""
         cfg = DaemonConfig(socket="/tmp/custom.sock")
         assert cfg.socket == "/tmp/custom.sock"
 
-    def test_is_mutable(self) -> None:
-        """DaemonConfig should be mutable."""
-        cfg = DaemonConfig()
-        cfg.socket = "/new/path.sock"
-        assert cfg.socket == "/new/path.sock"
+    def test_custom_log_level(self) -> None:
+        cfg = DaemonConfig(log_level="debug")
+        assert cfg.log_level == "debug"
 
 
 class TestDockerConfig:
     """Tests for DockerConfig struct."""
 
     def test_default_values(self) -> None:
-        """Should have correct defaults."""
         cfg = DockerConfig()
         assert cfg.image == "ubuntu:24.04"
 
     def test_custom_image(self) -> None:
-        """Should accept custom image."""
         cfg = DockerConfig(image="python:3.12")
         assert cfg.image == "python:3.12"
-
-
-class TestLLMConfig:
-    """Tests for LLMConfig struct."""
-
-    def test_default_values(self) -> None:
-        """Should have correct defaults."""
-        cfg = LLMConfig()
-        assert cfg.provider == "openai"
-        assert cfg.api_key_env == "OPENAI_API_KEY"
-        assert cfg.default_model == "gpt-4o"
-        assert cfg.base_url == ""
-
-    def test_custom_values(self) -> None:
-        """Should accept custom values."""
-        cfg = LLMConfig(
-            provider="anthropic",
-            api_key_env="ANTHROPIC_API_KEY",
-            default_model="claude-3-opus",
-            base_url="https://custom.api.com",
-        )
-        assert cfg.provider == "anthropic"
-        assert cfg.api_key_env == "ANTHROPIC_API_KEY"
-        assert cfg.default_model == "claude-3-opus"
-        assert cfg.base_url == "https://custom.api.com"
 
 
 class TestSkillsConfig:
     """Tests for SkillsConfig struct."""
 
     def test_default_values(self) -> None:
-        """Should have correct defaults."""
         cfg = SkillsConfig()
         assert cfg.paths == ["~/.yagents/skills"]
 
     def test_custom_paths(self) -> None:
-        """Should accept custom paths."""
         cfg = SkillsConfig(paths=["/custom/path", "/another/path"])
         assert cfg.paths == ["/custom/path", "/another/path"]
 
@@ -97,155 +67,291 @@ class TestTavilyConfig:
     """Tests for TavilyConfig struct."""
 
     def test_default_values(self) -> None:
-        """Should have correct defaults."""
         cfg = TavilyConfig()
         assert cfg.api_key_env == "TAVILY_API_KEY"
 
     def test_custom_env(self) -> None:
-        """Should accept custom env var name."""
         cfg = TavilyConfig(api_key_env="MY_TAVILY_KEY")
         assert cfg.api_key_env == "MY_TAVILY_KEY"
 
 
-class TestPersonaConfig:
-    """Tests for PersonaConfig struct."""
+class TestPricingEntry:
+    """Tests for PricingEntry struct."""
+
+    def test_required_model(self) -> None:
+        entry = PricingEntry(model="gpt-4o")
+        assert entry.model == "gpt-4o"
+        assert entry.input_mtok == 0.0
+        assert entry.output_mtok == 0.0
+        assert entry.cache_read_mtok == 0.0
+        assert entry.cache_write_mtok == 0.0
+
+    def test_full_pricing(self) -> None:
+        entry = PricingEntry(
+            model="gpt-4o",
+            input_mtok=2.50,
+            output_mtok=10.00,
+            cache_read_mtok=1.25,
+            cache_write_mtok=3.75,
+        )
+        assert entry.input_mtok == 2.50
+        assert entry.output_mtok == 10.00
+        assert entry.cache_read_mtok == 1.25
+        assert entry.cache_write_mtok == 3.75
+
+
+class TestProviderConfig:
+    """Tests for ProviderConfig struct."""
 
     def test_default_values(self) -> None:
-        """Should have correct defaults."""
-        cfg = PersonaConfig()
-        assert cfg.system_prompt == ""
-        assert cfg.tools == []
-        assert cfg.skills == []
+        cfg = ProviderConfig()
+        assert cfg.kind == "openai"
+        assert cfg.api_key_env == "OPENAI_API_KEY"
+        assert cfg.default_model == "gpt-4o"
+        assert cfg.base_url == ""
+        assert cfg.organization == ""
+        assert cfg.pricing == []
 
-    def test_custom_values(self) -> None:
-        """Should accept custom values."""
-        cfg = PersonaConfig(
-            system_prompt="You are a coder",
+    def test_anthropic_provider(self) -> None:
+        cfg = ProviderConfig(
+            kind="anthropic",
+            api_key_env="ANTHROPIC_API_KEY",
+            default_model="claude-sonnet-4-20250514",
+        )
+        assert cfg.kind == "anthropic"
+        assert cfg.api_key_env == "ANTHROPIC_API_KEY"
+        assert cfg.default_model == "claude-sonnet-4-20250514"
+
+    def test_with_pricing(self) -> None:
+        cfg = ProviderConfig(
+            pricing=[
+                PricingEntry(model="gpt-4o", input_mtok=2.50, output_mtok=10.00),
+            ]
+        )
+        assert len(cfg.pricing) == 1
+        assert cfg.pricing[0].model == "gpt-4o"
+
+    def test_with_base_url(self) -> None:
+        cfg = ProviderConfig(
+            kind="openai",
+            base_url="https://openrouter.ai/api/v1",
+        )
+        assert cfg.base_url == "https://openrouter.ai/api/v1"
+
+
+class TestAgentEntry:
+    """Tests for AgentEntry struct."""
+
+    def test_default_values(self) -> None:
+        entry = AgentEntry()
+        assert entry.provider == ""
+        assert entry.model == ""
+        assert entry.persona == ""
+        assert entry.tools == []
+        assert entry.skills == []
+
+    def test_full_agent(self) -> None:
+        entry = AgentEntry(
+            provider="openai-default",
+            model="gpt-4o",
+            persona="You are a coder",
             tools=["execute_bash", "read_file"],
             skills=["git-worktree"],
         )
-        assert cfg.system_prompt == "You are a coder"
-        assert cfg.tools == ["execute_bash", "read_file"]
-        assert cfg.skills == ["git-worktree"]
+        assert entry.provider == "openai-default"
+        assert entry.model == "gpt-4o"
+        assert entry.persona == "You are a coder"
+        assert entry.tools == ["execute_bash", "read_file"]
+        assert entry.skills == ["git-worktree"]
 
 
 class TestConfig:
     """Tests for main Config struct."""
 
     def test_default_values(self) -> None:
-        """Should have correct defaults for all sections."""
         cfg = Config()
         assert isinstance(cfg.daemon, DaemonConfig)
         assert isinstance(cfg.docker, DockerConfig)
-        assert isinstance(cfg.llm, LLMConfig)
         assert isinstance(cfg.skills, SkillsConfig)
         assert isinstance(cfg.tavily, TavilyConfig)
-        assert cfg.personas == {}
+        assert cfg.providers == {}
+        assert cfg.agents == {}
 
     def test_socket_path_property(self) -> None:
-        """socket_path should expand user home."""
         cfg = Config()
         path = cfg.socket_path
         assert isinstance(path, Path)
         assert str(path).startswith("/")
-        assert ".local/run/yagents.sock" in str(path)
+        assert "yagents/yagents.sock" in str(path)
 
     def test_custom_socket_path_expansion(self) -> None:
-        """Should expand custom socket paths."""
         cfg = Config(daemon=DaemonConfig(socket="~/custom.sock"))
         path = cfg.socket_path
         assert str(path).startswith("/")
         assert path.name == "custom.sock"
 
-    def test_with_personas(self) -> None:
-        """Should accept personas dictionary."""
-        personas = {
-            "coder": PersonaConfig(
-                system_prompt="You are a coder",
-                tools=["execute_bash"],
-            ),
-            "researcher": PersonaConfig(
-                system_prompt="You are a researcher",
-                tools=["web_search"],
-            ),
-        }
-        cfg = Config(personas=personas)
-        assert "coder" in cfg.personas
-        assert "researcher" in cfg.personas
-        assert cfg.personas["coder"].system_prompt == "You are a coder"
+    def test_with_providers_and_agents(self) -> None:
+        cfg = Config(
+            providers={
+                "openai-default": ProviderConfig(
+                    kind="openai",
+                    default_model="gpt-4o",
+                ),
+            },
+            agents={
+                "main": AgentEntry(
+                    provider="openai-default",
+                    model="gpt-4o",
+                    persona="You are a coder",
+                    tools=["execute_bash"],
+                ),
+            },
+        )
+        assert "openai-default" in cfg.providers
+        assert "main" in cfg.agents
+        assert cfg.agents["main"].provider == "openai-default"
+
+    def test_validate_valid_config(self) -> None:
+        cfg = Config(
+            providers={"p1": ProviderConfig()},
+            agents={"main": AgentEntry(provider="p1")},
+        )
+        assert cfg.validate() == []
+
+    def test_validate_missing_provider_reference(self) -> None:
+        cfg = Config(
+            providers={},
+            agents={"main": AgentEntry(provider="nonexistent")},
+        )
+        errors = cfg.validate()
+        assert len(errors) == 1
+        assert "nonexistent" in errors[0]
+
+    def test_validate_empty_provider_reference_ok(self) -> None:
+        """Agent with empty provider should not trigger validation error."""
+        cfg = Config(
+            agents={"main": AgentEntry(provider="")},
+        )
+        assert cfg.validate() == []
 
     def test_nested_config_modification(self) -> None:
-        """Should be able to modify nested configs."""
         cfg = Config()
-        cfg.llm.default_model = "gpt-3.5-turbo"
-        assert cfg.llm.default_model == "gpt-3.5-turbo"
+        cfg.docker.image = "python:3.12"
+        assert cfg.docker.image == "python:3.12"
+
+
+class TestDeepMerge:
+    """Tests for _deep_merge helper."""
+
+    def test_simple_override(self) -> None:
+        base = {"a": 1, "b": 2}
+        override = {"b": 3}
+        result = _deep_merge(base, override)
+        assert result == {"a": 1, "b": 3}
+
+    def test_nested_merge(self) -> None:
+        base = {"x": {"a": 1, "b": 2}}
+        override = {"x": {"b": 3}}
+        result = _deep_merge(base, override)
+        assert result == {"x": {"a": 1, "b": 3}}
+
+    def test_add_new_key(self) -> None:
+        base = {"a": 1}
+        override = {"b": 2}
+        result = _deep_merge(base, override)
+        assert result == {"a": 1, "b": 2}
+
+    def test_does_not_mutate_base(self) -> None:
+        base = {"a": {"b": 1}}
+        override = {"a": {"b": 2}}
+        _deep_merge(base, override)
+        assert base == {"a": {"b": 1}}
+
+    def test_list_replaced_not_merged(self) -> None:
+        base = {"a": [1, 2]}
+        override = {"a": [3]}
+        result = _deep_merge(base, override)
+        assert result == {"a": [3]}
 
 
 class TestLoadConfig:
     """Tests for load() function."""
 
     def test_load_missing_file_returns_defaults(self) -> None:
-        """Should return defaults when file doesn't exist."""
-        cfg = load("/nonexistent/path/config.toml")
+        cfg = load("/nonexistent/path/config.yaml")
         assert isinstance(cfg, Config)
-        assert cfg.llm.default_model == "gpt-4o"
+        assert cfg.docker.image == "ubuntu:24.04"
 
     def test_load_minimal_config(self, tmp_path: Path) -> None:
-        """Should load minimal TOML config."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[daemon]
-socket = "/tmp/test.sock"
-""")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("daemon:\n  socket: /tmp/test.sock\n")
         cfg = load(config_file)
         assert cfg.daemon.socket == "/tmp/test.sock"
         # Other sections should have defaults
-        assert cfg.llm.default_model == "gpt-4o"
+        assert cfg.docker.image == "ubuntu:24.04"
 
     def test_load_full_config(self, tmp_path: Path) -> None:
-        """Should load full TOML config."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[daemon]
-socket = "/tmp/test.sock"
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""\
+daemon:
+  socket: /tmp/test.sock
+  log_level: debug
 
-[docker]
-image = "python:3.12"
+docker:
+  image: python:3.12
 
-[llm]
-provider = "anthropic"
-api_key_env = "ANTHROPIC_API_KEY"
-default_model = "claude-3-opus"
-base_url = "https://custom.api.com"
+skills:
+  paths:
+    - /path/to/skills
+    - ~/custom/skills
 
-[skills]
-paths = ["/path/to/skills", "~/custom/skills"]
+tavily:
+  api_key_env: MY_TAVILY_KEY
 
-[tavily]
-api_key_env = "MY_TAVILY_KEY"
+providers:
+  openai-main:
+    kind: openai
+    api_key_env: OPENAI_API_KEY
+    default_model: gpt-4o
+    base_url: https://custom.api.com
+    organization: my-org
+    pricing:
+      - model: gpt-4o
+        input_mtok: 2.50
+        output_mtok: 10.00
 
-[personas.coder]
-system_prompt = "You are a senior developer"
-tools = ["execute_bash", "read_file", "write_file"]
-skills = ["git-worktree"]
+  anthropic-main:
+    kind: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    default_model: claude-sonnet-4-20250514
 
-[personas.researcher]
-system_prompt = "You are a research assistant"
-tools = ["web_search", "read_file"]
+agents:
+  main:
+    provider: openai-main
+    model: gpt-4o
+    persona: You are a senior developer
+    tools:
+      - execute_bash
+      - read_file
+      - write_file
+    skills:
+      - git-worktree
+
+  researcher:
+    provider: anthropic-main
+    persona: You are a research assistant
+    tools:
+      - web_search
+      - read_file
 """)
         cfg = load(config_file)
 
         # Check daemon
         assert cfg.daemon.socket == "/tmp/test.sock"
+        assert cfg.daemon.log_level == "debug"
 
         # Check docker
         assert cfg.docker.image == "python:3.12"
-
-        # Check llm
-        assert cfg.llm.provider == "anthropic"
-        assert cfg.llm.api_key_env == "ANTHROPIC_API_KEY"
-        assert cfg.llm.default_model == "claude-3-opus"
-        assert cfg.llm.base_url == "https://custom.api.com"
 
         # Check skills
         assert cfg.skills.paths == ["/path/to/skills", "~/custom/skills"]
@@ -253,108 +359,150 @@ tools = ["web_search", "read_file"]
         # Check tavily
         assert cfg.tavily.api_key_env == "MY_TAVILY_KEY"
 
-        # Check personas
-        assert "coder" in cfg.personas
-        assert cfg.personas["coder"].system_prompt == "You are a senior developer"
-        assert cfg.personas["coder"].tools == [
-            "execute_bash",
-            "read_file",
-            "write_file",
-        ]
-        assert cfg.personas["coder"].skills == ["git-worktree"]
+        # Check providers
+        assert "openai-main" in cfg.providers
+        p = cfg.providers["openai-main"]
+        assert p.kind == "openai"
+        assert p.default_model == "gpt-4o"
+        assert p.base_url == "https://custom.api.com"
+        assert p.organization == "my-org"
+        assert len(p.pricing) == 1
+        assert p.pricing[0].model == "gpt-4o"
+        assert p.pricing[0].input_mtok == 2.50
 
-        assert "researcher" in cfg.personas
-        assert (
-            cfg.personas["researcher"].system_prompt == "You are a research assistant"
-        )
+        assert "anthropic-main" in cfg.providers
+        assert cfg.providers["anthropic-main"].kind == "anthropic"
 
-    def test_load_partial_persona(self, tmp_path: Path) -> None:
-        """Should load persona with partial fields."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[personas.minimal]
-system_prompt = "Minimal persona"
-""")
-        cfg = load(config_file)
-        assert cfg.personas["minimal"].system_prompt == "Minimal persona"
-        assert cfg.personas["minimal"].tools == []
-        assert cfg.personas["minimal"].skills == []
+        # Check agents
+        assert "main" in cfg.agents
+        main = cfg.agents["main"]
+        assert main.provider == "openai-main"
+        assert main.persona == "You are a senior developer"
+        assert main.tools == ["execute_bash", "read_file", "write_file"]
+        assert main.skills == ["git-worktree"]
+
+        assert "researcher" in cfg.agents
+        assert cfg.agents["researcher"].provider == "anthropic-main"
+
+        # Validate referential integrity
+        assert cfg.validate() == []
 
     def test_load_empty_file(self, tmp_path: Path) -> None:
-        """Should handle empty TOML file."""
-        config_file = tmp_path / "config.toml"
+        config_file = tmp_path / "config.yaml"
         config_file.write_text("")
         cfg = load(config_file)
         assert isinstance(cfg, Config)
-        assert cfg.llm.default_model == "gpt-4o"
+        assert cfg.docker.image == "ubuntu:24.04"
 
-    def test_load_invalid_toml(self, tmp_path: Path) -> None:
-        """Should raise error for invalid TOML."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("invalid toml content [[[")
-        with pytest.raises(Exception):  # tomllib.TOMLDecodeError
+    def test_load_invalid_yaml(self, tmp_path: Path) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("invalid: yaml: content: [[[")
+        with pytest.raises(Exception):
             load(config_file)
 
     def test_load_unknown_sections_ignored(self, tmp_path: Path) -> None:
-        """Unknown sections should be handled gracefully."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[daemon]
-socket = "/tmp/test.sock"
-
-[unknown_section]
-field = "value"
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""\
+daemon:
+  socket: /tmp/test.sock
+unknown_section:
+  field: value
 """)
-        # Should not raise, but unknown section is ignored
+        # msgspec should ignore unknown fields or raise — depends on strict mode
+        # For now just verify it doesn't crash on known fields
         cfg = load(config_file)
         assert cfg.daemon.socket == "/tmp/test.sock"
 
     def test_load_with_path_object(self, tmp_path: Path) -> None:
-        """Should accept Path object."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("[daemon]\nsocket = '/tmp/test.sock'")
-        cfg = load(config_file)  # Pass Path object
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("daemon:\n  socket: /tmp/test.sock\n")
+        cfg = load(config_file)
         assert cfg.daemon.socket == "/tmp/test.sock"
 
     def test_load_with_string_path(self, tmp_path: Path) -> None:
-        """Should accept string path."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("[daemon]\nsocket = '/tmp/test.sock'")
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("daemon:\n  socket: /tmp/test.sock\n")
         cfg = load(str(config_file))
         assert cfg.daemon.socket == "/tmp/test.sock"
 
     def test_load_no_args_works(self) -> None:
-        """Should work when called without args (uses default path)."""
-        # This tests that load() without args doesn't crash
-        # When config file doesn't exist, it should return defaults
         cfg = load()
         assert isinstance(cfg, Config)
-        assert cfg.llm.default_model == "gpt-4o"
+
+
+class TestLoadMerged:
+    """Tests for load_merged() function."""
+
+    def test_merge_overrides(self, tmp_path: Path) -> None:
+        base = tmp_path / "config.yaml"
+        base.write_text("""\
+docker:
+  image: ubuntu:24.04
+providers:
+  openai-default:
+    kind: openai
+    default_model: gpt-4o
+""")
+        overrides = tmp_path / "overrides.yaml"
+        overrides.write_text("""\
+docker:
+  image: python:3.12
+""")
+        cfg = load_merged(base, overrides)
+        assert cfg.docker.image == "python:3.12"
+        # Provider should survive merge
+        assert "openai-default" in cfg.providers
+
+    def test_missing_base_raises(self, tmp_path: Path) -> None:
+        with pytest.raises(FileNotFoundError):
+            load_merged(tmp_path / "nonexistent.yaml")
+
+    def test_missing_overrides_ok(self, tmp_path: Path) -> None:
+        base = tmp_path / "config.yaml"
+        base.write_text("docker:\n  image: ubuntu:24.04\n")
+        cfg = load_merged(base, tmp_path / "nonexistent.yaml")
+        assert cfg.docker.image == "ubuntu:24.04"
 
 
 class TestConfigSerialization:
     """Tests for config serialization."""
 
     def test_config_to_dict(self) -> None:
-        """Should convert config to dict."""
         cfg = Config()
-        # msgspec structs can be converted to dict
         data = msgspec.to_builtins(cfg)
         assert "daemon" in data
         assert "docker" in data
-        assert "llm" in data
+        assert "providers" in data
+        assert "agents" in data
 
     def test_config_round_trip(self, tmp_path: Path) -> None:
-        """Config should survive round-trip through TOML."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("""
-[llm]
-default_model = "gpt-3.5-turbo"
-
-[personas.test]
-system_prompt = "Test persona"
-tools = ["bash"]
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("""\
+providers:
+  test-provider:
+    kind: openai
+    default_model: gpt-3.5-turbo
+agents:
+  main:
+    provider: test-provider
+    persona: Test persona
+    tools:
+      - execute_bash
 """)
-        cfg1 = load(config_file)
-        assert cfg1.llm.default_model == "gpt-3.5-turbo"
-        assert cfg1.personas["test"].system_prompt == "Test persona"
+        cfg = load(config_file)
+        assert cfg.providers["test-provider"].default_model == "gpt-3.5-turbo"
+        assert cfg.agents["main"].persona == "Test persona"
+
+
+class TestPathConsistency:
+    """Verify all paths use ~/.yagents/ consistently."""
+
+    def test_default_socket_under_yagents(self) -> None:
+        cfg = DaemonConfig()
+        assert "yagents" in cfg.socket
+        assert "yuuagents" not in cfg.socket
+
+    def test_default_skills_under_yagents(self) -> None:
+        cfg = SkillsConfig()
+        assert all("yagents" in p for p in cfg.paths)
+        assert all("yuuagents" not in p for p in cfg.paths)

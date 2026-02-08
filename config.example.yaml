@@ -1,0 +1,97 @@
+# ============================================================================
+# yagents — Default Configuration
+# ============================================================================
+#
+# This is the reference configuration with all available options and their
+# default values.  Run `yagents setup` to install it to ~/.yagents/config.yaml.
+#
+# To customise settings without editing this file, create a
+# `config.overrides.yaml` next to this file (in the project root) and run
+# `yagents setup` again — overrides are deep-merged on top of the defaults.
+#
+# Runtime config location:  ~/.yagents/config.yaml
+# ============================================================================
+
+# -- Daemon -------------------------------------------------------------------
+
+daemon:
+  # Unix domain socket the daemon listens on.
+  socket: ~/.yagents/yagents.sock
+  # Log level: debug | info | warning | error
+  log_level: info
+
+# -- Docker (REQUIRED) -------------------------------------------------------
+# yagents runs ALL agent tools (bash, file read/write) inside Docker
+# containers for security isolation.  A running Docker daemon is mandatory.
+#
+# Prerequisites:
+#   1. Install Docker Engine — https://docs.docker.com/engine/install/
+#   2. Ensure your user is in the `docker` group (or use rootless Docker).
+#   3. Run `yagents setup` to pull the default image automatically.
+
+docker:
+  # Default Docker image for agent containers.
+  # The image must have `bash` available.  `yagents setup` will pull this image.
+  image: ubuntu:24.04
+
+# -- Agent Skills -------------------------------------------------------------
+
+skills:
+  # Directories scanned for SKILL.md files (Agent Skills standard).
+  # Supports ~ expansion.
+  paths:
+    - ~/.yagents/skills
+
+# -- Web Search (Tavily) -----------------------------------------------------
+
+tavily:
+  # Name of the environment variable that holds the Tavily API key.
+  api_key_env: TAVILY_API_KEY
+
+# -- LLM Providers -----------------------------------------------------------
+# Named provider configurations.  Each agent references a provider by name.
+# You can define multiple providers (e.g. one for OpenAI, one for Anthropic).
+
+providers:
+  openai-default:
+    kind: openai                     # openai | anthropic
+    api_key_env: OPENAI_API_KEY
+    default_model: gpt-4o
+    # Optional: custom API base URL (e.g. OpenRouter, local vLLM, etc.)
+    base_url: ""
+    # Optional: OpenAI organization header
+    organization: ""
+    # Optional: per-model pricing overrides (USD per million tokens)
+    pricing: []
+
+# -- Agents -------------------------------------------------------------------
+# Pre-configured agent roles.  Use with `yagents run --agent <name>`.
+# The "main" agent is the primary agent used by default.
+# If --agent does not match any name, it is used as a raw system prompt.
+
+agents:
+  main:
+    provider: openai-default
+    model: gpt-4o
+    persona: >
+      You are a senior software engineer. You write clean,
+      well-tested code. You prefer simple solutions and avoid over-engineering.
+    tools:
+      - execute_bash
+      - read_file
+      - write_file
+      - delete_file
+      - web_search
+    skills:
+      - "*"                          # "*" = inject all discovered skills
+
+  researcher:
+    provider: openai-default
+    model: gpt-4o
+    persona: >
+      You are a research assistant. You search the web thoroughly
+      and synthesize information into clear, well-structured reports.
+    tools:
+      - web_search
+      - read_file
+      - write_file

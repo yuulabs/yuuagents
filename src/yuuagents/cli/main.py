@@ -4,24 +4,34 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 import click
+import yaml
 
-from yuuagents.config import load as load_config
+from yuuagents.config import (
+    DEFAULT_CONFIG_PATH,
+    YAGENTS_HOME,
+    _PROJECT_CONFIG_NAME,
+    _PROJECT_OVERRIDES_NAME,
+    _deep_merge,
+    find_project_root,
+    load as load_config,
+    load_merged,
+)
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from yuuagents.cli.client import YAgentsClient
 
-_DEFAULT_SOCKET = "~/.local/run/yagents.sock"
-
 
 def _socket(ctx: click.Context) -> str:
-    return str(Path(ctx.obj or _DEFAULT_SOCKET).expanduser())
+    return str(Path(ctx.obj).expanduser())
 
 
-def _client(ctx: click.Context)->YAgentsClient:
+def _client(ctx: click.Context) -> YAgentsClient:
     from yuuagents.cli.client import YAgentsClient
 
     return YAgentsClient(_socket(ctx))
@@ -35,12 +45,259 @@ def _client(ctx: click.Context)->YAgentsClient:
 )
 @click.pass_context
 def cli(ctx: click.Context, socket: str | None) -> None:
-    """yuuagents — minimal agent framework."""
+    """yagents — minimal agent framework."""
     if socket:
         ctx.obj = socket
     else:
         cfg = load_config()
         ctx.obj = str(cfg.socket_path)
+
+
+# ── Setup ──
+
+
+@cli.command()
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to config.yaml (fully replaces defaults — requires confirmation)",
+)
+@click.option(
+    "--overrides",
+    "overrides_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to config.overrides.yaml (deep-merged on top)",
+)
+@click.option(
+    "--project-dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="Project root containing config.example.yaml (default: auto-detect)",
+)
+@click.pass_context
+def setup(
+    ctx: click.Context,
+    config_path: str | None,
+    overrides_path: str | None,
+    project_dir: str | None,
+) -> None:
+    """One-time setup: install config, create directories, pull Docker, register service.
+
+    \b
+    Config resolution order:
+      1. Start with defaults (config.example.yaml from project root).
+      2. If --overrides is given, deep-merge it on top.
+      3. If --config is given, it FULLY REPLACES the result (with confirmation).
+
+    \b
+    This command will:
+      1. Write merged config to ~/.yagents/config.yaml.
+      2. Create required directories (~/.yagents/skills, ~/.yagents/dockers).
+      3. Install Docker if needed (prompts for sudo).
+      4. Pull the Docker image specified in the config.
+      5. Register yagents as a systemd user service.
+    """
+    # -- Step 0: resolve config sources --
+    if config_path:
+        # User provided a full config — requires confirmation
+        click.echo(f"Config file:   {config_path}")
+        click.echo(
+            "WARNING: --config fully replaces the default configuration."
+        )
+        if not click.confirm("Are you sure you want to proceed?"):
+            click.echo("Aborted.")
+            sys.exit(0)
+
+        user_config_p = Path(config_path)
+        user_data = yaml.safe_load(user_config_p.read_text(encoding="utf-8")) or {}
+
+        # Apply overrides on top if given
+        if overrides_path:
+            over_p = Path(overrides_path)
+            over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+            user_data = _deep_merge(user_data, over_data)
+            click.echo(f"Overrides:     {overrides_path}")
+
+        merged_data = user_data
+    else:
+        # Auto-detect project root for config.example.yaml
+        if project_dir:
+            root = Path(project_dir)
+        else:
+            root = find_project_root()
+
+        if root is None or not (root / _PROJECT_CONFIG_NAME).exists():
+            click.echo(
+                f"Error: cannot find {_PROJECT_CONFIG_NAME}. "
+                "Run this command from the project directory or pass --project-dir.",
+                err=True,
+            )
+            sys.exit(1)
+
+        base_path = root / _PROJECT_CONFIG_NAME
+        click.echo(f"Project root:  {root}")
+        click.echo(f"Base config:   {base_path}")
+
+        base_data = yaml.safe_load(base_path.read_text(encoding="utf-8")) or {}
+
+        # Check for project-level overrides
+        proj_overrides = root / _PROJECT_OVERRIDES_NAME
+        if proj_overrides.exists():
+            over_data = yaml.safe_load(proj_overrides.read_text(encoding="utf-8")) or {}
+            base_data = _deep_merge(base_data, over_data)
+            click.echo(f"Overrides:     {proj_overrides}")
+        else:
+            click.echo(
+                f"Overrides:     (none — {_PROJECT_OVERRIDES_NAME} not found)"
+            )
+
+        # Apply CLI --overrides on top
+        if overrides_path:
+            over_p = Path(overrides_path)
+            over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+            base_data = _deep_merge(base_data, over_data)
+            click.echo(f"CLI overrides: {overrides_path}")
+
+        merged_data = base_data
+
+    # -- Step 1: write config --
+    click.echo()
+    click.echo("[1/4] Installing configuration ...")
+
+    YAGENTS_HOME.mkdir(parents=True, exist_ok=True)
+    DEFAULT_CONFIG_PATH.write_text(
+        yaml.dump(merged_data, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    click.echo(f"  -> {DEFAULT_CONFIG_PATH}")
+
+    # Load the config for subsequent steps
+    cfg = load_config()
+
+    # Validate
+    errors = cfg.validate()
+    if errors:
+        click.echo("  WARNING: configuration has validation errors:", err=True)
+        for e in errors:
+            click.echo(f"    - {e}", err=True)
+
+    # -- Step 2: create directories --
+    click.echo()
+    click.echo("[2/4] Creating directories ...")
+
+    dirs_to_create = [
+        YAGENTS_HOME / "skills",
+        YAGENTS_HOME / "dockers",
+    ]
+    for sp in cfg.skills.paths:
+        dirs_to_create.append(Path(sp).expanduser())
+
+    for d in dirs_to_create:
+        d.mkdir(parents=True, exist_ok=True)
+        click.echo(f"  -> {d}")
+
+    # -- Step 3: Docker --
+    click.echo()
+    click.echo("[3/4] Setting up Docker ...")
+
+    image = cfg.docker.image
+    click.echo(f"  Image: {image}")
+
+    if not _docker_available():
+        click.echo(
+            "  WARNING: Docker is not installed or not running.\n"
+            "  yagents requires Docker to function. Please install Docker:\n"
+            "    https://docs.docker.com/engine/install/\n"
+            "  You may need to run: sudo apt install docker.io && sudo usermod -aG docker $USER\n"
+            f"  Then run `docker pull {image}` manually.",
+            err=True,
+        )
+    else:
+        if _image_exists(image):
+            click.echo(f"  Image {image} already available locally.")
+        else:
+            click.echo(f"  Pulling {image} (this may take a minute) ...")
+            result = subprocess.run(
+                ["docker", "pull", image],
+                capture_output=False,
+            )
+            if result.returncode != 0:
+                click.echo(
+                    f"  WARNING: Failed to pull {image}. "
+                    f"You can retry with `docker pull {image}`.",
+                    err=True,
+                )
+            else:
+                click.echo(f"  Image {image} pulled successfully.")
+
+    # -- Step 4: systemd service --
+    click.echo()
+    click.echo("[4/4] Registering systemd user service ...")
+
+    try:
+        from yuuagents.cli.service import install as install_service
+
+        unit_path = install_service()
+        click.echo(f"  Service installed: {unit_path}")
+        click.echo("  Service enabled and started.")
+    except FileNotFoundError as e:
+        click.echo(f"  WARNING: {e}", err=True)
+        click.echo("  You can start the daemon manually: yagents start", err=True)
+    except RuntimeError as e:
+        click.echo(f"  WARNING: {e}", err=True)
+        click.echo("  You can start the daemon manually: yagents start", err=True)
+
+    # -- Done --
+    click.echo()
+    click.echo("Setup complete!")
+    click.echo()
+
+    # Show next steps based on first provider
+    if cfg.providers:
+        first_provider = next(iter(cfg.providers.values()))
+        click.echo("Next steps:")
+        click.echo(
+            f"  1. Set your LLM API key:  export {first_provider.api_key_env}=sk-..."
+        )
+        click.echo(
+            '  2. Run an agent:          yagents run --agent main --task "hello world"'
+        )
+    else:
+        click.echo("Next steps:")
+        click.echo("  1. Configure at least one provider in ~/.yagents/config.yaml")
+        click.echo("  2. Set your LLM API key")
+        click.echo(
+            '  3. Run an agent:          yagents run --agent main --task "hello world"'
+        )
+
+
+def _docker_available() -> bool:
+    """Check if Docker CLI is available and daemon is running."""
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _image_exists(image: str) -> bool:
+    """Check if a Docker image exists locally."""
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 # ── Daemon management ──
@@ -62,35 +319,59 @@ def start(ctx: click.Context, config_path: str | None) -> None:
 @click.pass_context
 def stop(ctx: click.Context) -> None:
     """Stop the running daemon."""
-    import signal
-
-    # Send SIGTERM to the daemon via the socket health check
     c = _client(ctx)
     try:
         c.health()
         click.echo("Sending shutdown signal...")
-        # The daemon handles SIGTERM; for CLI we just confirm it's alive
-        click.echo("Use systemctl stop yagents or kill the daemon process.")
+        click.echo("Use `yagents down` to stop and unregister the service,")
+        click.echo("or `systemctl --user stop yagents` to stop the daemon.")
     except Exception:
         click.echo("Daemon is not running.")
     finally:
         c.close()
 
 
+@cli.command()
+def down() -> None:
+    """Stop the daemon and unregister the systemd service."""
+    from yuuagents.cli.service import uninstall
+
+    click.echo("Stopping yagents service ...")
+    try:
+        uninstall()
+        click.echo("Service stopped and unregistered.")
+    except RuntimeError as e:
+        click.echo(f"WARNING: {e}", err=True)
+        click.echo("You may need to stop the daemon manually.", err=True)
+
+
 # ── Agent management ──
 
 
 @cli.command()
-@click.option("--persona", required=True, help="Persona template name or full system prompt")
+@click.option(
+    "--agent",
+    "agent_name",
+    default="main",
+    help="Agent config name (default: main)",
+)
+@click.option(
+    "--persona",
+    default="",
+    help="Override the system prompt (persona) from agent config",
+)
 @click.option("--task", required=True, help="Task description")
 @click.option("--tools", default=None, help="Comma-separated tool names")
-@click.option("--skills", "skill_names", default=None, help="Comma-separated skill names")
+@click.option(
+    "--skills", "skill_names", default=None, help="Comma-separated skill names"
+)
 @click.option("--model", default="", help="LLM model override")
 @click.option("--container", default="", help="Existing Docker container ID to use")
 @click.option("--image", default="", help="Docker image to create a new container from")
 @click.pass_context
 def run(
     ctx: click.Context,
+    agent_name: str,
     persona: str,
     task: str,
     tools: str | None,
@@ -101,7 +382,8 @@ def run(
 ) -> None:
     """Submit a new agent task."""
     c = _client(ctx)
-    payload = {
+    payload: dict[str, object] = {
+        "agent": agent_name,
         "persona": persona,
         "task": task,
         "model": model,

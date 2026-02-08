@@ -9,7 +9,7 @@ import aiodocker
 from attrs import define, field
 from loguru import logger
 
-_DOCKERS_ROOT = Path("~/.yuuagents/dockers").expanduser()
+_DOCKERS_ROOT = Path("~/.yagents/dockers").expanduser()
 
 # Injected into every agent's system prompt so it knows the mount layout.
 DOCKER_SYSTEM_PROMPT = """\
@@ -162,7 +162,7 @@ class DockerManager:
             },
         }
         if agent_id:
-            config["Labels"] = {"yuuagents.agent_id": agent_id}
+            config["Labels"] = {"yagents.agent_id": agent_id}
 
         container = await self._client.containers.create_or_replace(
             name=name,

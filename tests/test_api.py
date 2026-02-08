@@ -68,7 +68,7 @@ class TestCreateAgentEndpoint:
     def test_create_agent_success(self, client: TestClient) -> None:
         """Should create agent and return id."""
         request_data = {
-            "persona": "coder",
+            "agent": "main",
             "task": "write hello world",
             "tools": ["execute_bash"],
             "model": "gpt-4",
@@ -83,7 +83,6 @@ class TestCreateAgentEndpoint:
     def test_create_agent_minimal(self, client: TestClient) -> None:
         """Should work with minimal required fields."""
         request_data = {
-            "persona": "coder",
             "task": "test",
         }
         response = client.post("/api/agents", json=request_data)
@@ -103,7 +102,7 @@ class TestCreateAgentEndpoint:
 
     def test_create_agent_missing_required_field(self, client: TestClient) -> None:
         """Should return error for missing required field."""
-        request_data = {"persona": "coder"}  # Missing task
+        request_data = {"agent": "main"}  # Missing task
         response = client.post("/api/agents", json=request_data)
         assert response.status_code == 400
 
@@ -125,7 +124,6 @@ class TestListAgentsEndpoint:
             client.post(
                 "/api/agents",
                 json={
-                    "persona": "coder",
                     "task": f"task{i}",
                 },
             )
@@ -148,7 +146,6 @@ class TestGetAgentEndpoint:
         create_response = client.post(
             "/api/agents",
             json={
-                "persona": "coder",
                 "task": "test task",
             },
         )
@@ -159,7 +156,6 @@ class TestGetAgentEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["agent_id"] == agent_id
-        assert data["persona"] == "coder"
         assert data["task"] == "test task"
         assert "status" in data
         assert "created_at" in data
@@ -181,7 +177,6 @@ class TestGetHistoryEndpoint:
         create_response = client.post(
             "/api/agents",
             json={
-                "persona": "coder",
                 "task": "test",
             },
         )
@@ -213,7 +208,6 @@ class TestPostInputEndpoint:
         create_response = client.post(
             "/api/agents",
             json={
-                "persona": "coder",
                 "task": "test",
             },
         )
@@ -244,7 +238,6 @@ class TestDeleteAgentEndpoint:
         create_response = client.post(
             "/api/agents",
             json={
-                "persona": "coder",
                 "task": "test",
             },
         )
@@ -301,8 +294,8 @@ class TestGetConfigEndpoint:
         data = response.json()
         assert "socket" in data
         assert "docker_image" in data
-        assert "llm_provider" in data
-        assert "llm_default_model" in data
+        assert "providers" in data
+        assert "agents" in data
         assert "skill_paths" in data
         # Should NOT contain api keys
         assert "api_key" not in str(data).lower()
@@ -321,7 +314,7 @@ class TestAPIContentTypes:
         """POST should require JSON content type."""
         response = client.post(
             "/api/agents",
-            content=b'{"persona": "coder", "task": "test"}',
+            content=b'{"task": "test"}',
         )
         # Without Content-Type header, should still work or give clear error
         assert response.status_code in [201, 400, 415]

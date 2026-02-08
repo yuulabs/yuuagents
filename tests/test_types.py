@@ -112,8 +112,9 @@ class TestTaskRequest:
 
     def test_task_request_minimal(self) -> None:
         """Should create TaskRequest with minimal required fields."""
-        req = TaskRequest(persona="coder", task="write hello world")
-        assert req.persona == "coder"
+        req = TaskRequest(task="write hello world")
+        assert req.agent == "main"
+        assert req.persona == ""
         assert req.task == "write hello world"
         assert req.tools == []
         assert req.skills == []
@@ -124,7 +125,8 @@ class TestTaskRequest:
     def test_task_request_full(self) -> None:
         """Should create TaskRequest with all fields."""
         req = TaskRequest(
-            persona="coder",
+            agent="researcher",
+            persona="Custom persona",
             task="write hello world",
             tools=["execute_bash", "read_file"],
             skills=["git-worktree"],
@@ -132,7 +134,8 @@ class TestTaskRequest:
             container="my-container",
             image="ubuntu:24.04",
         )
-        assert req.persona == "coder"
+        assert req.agent == "researcher"
+        assert req.persona == "Custom persona"
         assert req.task == "write hello world"
         assert req.tools == ["execute_bash", "read_file"]
         assert req.skills == ["git-worktree"]
@@ -142,34 +145,32 @@ class TestTaskRequest:
 
     def test_task_request_is_frozen(self) -> None:
         """TaskRequest should be immutable."""
-        req = TaskRequest(persona="coder", task="test")
+        req = TaskRequest(task="test")
         with pytest.raises(AttributeError):
             req.task = "new task"  # type: ignore[misc]
 
     def test_task_request_kw_only(self) -> None:
         """TaskRequest should require keyword arguments."""
         with pytest.raises(TypeError):
-            TaskRequest("coder", "task")  # type: ignore[misc]
+            TaskRequest("main", "task")  # type: ignore[misc]
 
     def test_task_request_missing_required(self) -> None:
-        """TaskRequest should require persona and task."""
+        """TaskRequest should require task."""
         with pytest.raises(TypeError):
             TaskRequest()  # type: ignore[call-arg]
-        with pytest.raises(TypeError):
-            TaskRequest(persona="coder")  # type: ignore[call-arg]
-        with pytest.raises(TypeError):
-            TaskRequest(task="test")  # type: ignore[call-arg]
 
     def test_task_request_serialization(self) -> None:
         """Should serialize/deserialize via msgspec."""
         req = TaskRequest(
-            persona="researcher",
+            agent="researcher",
+            persona="Custom persona",
             task="search for python",
             tools=["web_search"],
             model="gpt-4",
         )
         encoded = msgspec.json.encode(req)
         decoded = msgspec.json.decode(encoded, type=TaskRequest)
+        assert decoded.agent == req.agent
         assert decoded.persona == req.persona
         assert decoded.task == req.task
         assert decoded.tools == req.tools
@@ -177,17 +178,16 @@ class TestTaskRequest:
 
     def test_task_request_json_decode(self) -> None:
         """Should decode from JSON bytes."""
-        json_data = b'{"persona": "coder", "task": "hello", "tools": ["bash"]}'
+        json_data = b'{"task": "hello", "tools": ["bash"]}'
         decoder = msgspec.json.Decoder(TaskRequest)
         req = decoder.decode(json_data)
-        assert req.persona == "coder"
+        assert req.agent == "main"
         assert req.task == "hello"
         assert req.tools == ["bash"]
 
     def test_task_request_empty_lists(self) -> None:
         """Should handle empty lists for optional array fields."""
         req = TaskRequest(
-            persona="coder",
             task="test",
             tools=[],
             skills=[],
@@ -197,10 +197,10 @@ class TestTaskRequest:
 
     def test_task_request_extra_fields_ignored(self) -> None:
         """Extra fields should be ignored during JSON decoding (default msgspec behavior)."""
-        json_data = b'{"persona": "coder", "task": "hello", "unknown_field": "value"}'
+        json_data = b'{"task": "hello", "unknown_field": "value"}'
         # msgspec ignores unknown fields by default
         req = msgspec.json.decode(json_data, type=TaskRequest)
-        assert req.persona == "coder"
+        assert req.agent == "main"
         assert req.task == "hello"
         # unknown_field is silently ignored
 

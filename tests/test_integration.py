@@ -194,25 +194,25 @@ class TestConfigLoading:
     def test_load_default_config(self) -> None:
         """Should load default config."""
         config = Config()
-        assert config.llm.default_model == "gpt-4o"
         assert config.docker.image == "ubuntu:24.04"
 
-    def test_load_from_toml(self) -> None:
-        """Should load config from TOML file."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write("""
-[llm]
-default_model = "gpt-3.5-turbo"
-
-[docker]
-image = "python:3.12"
+    def test_load_from_yaml(self) -> None:
+        """Should load config from YAML file."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("""\
+docker:
+  image: python:3.12
+providers:
+  openai-default:
+    kind: openai
+    default_model: gpt-3.5-turbo
 """)
             f.flush()
 
             try:
                 config = load_config(f.name)
-                assert config.llm.default_model == "gpt-3.5-turbo"
                 assert config.docker.image == "python:3.12"
+                assert config.providers["openai-default"].default_model == "gpt-3.5-turbo"
             finally:
                 os.unlink(f.name)
 
@@ -283,7 +283,7 @@ class TestManagerIntegration:
             await manager.start()
 
             req = TaskRequest(
-                persona="coder",
+                agent="main",
                 task="test task",
                 tools=[],
             )
@@ -308,7 +308,7 @@ class TestManagerIntegration:
             await manager.start()
 
             req = TaskRequest(
-                persona="coder",
+                agent="main",
                 task="long running task",
                 tools=[],
             )
@@ -363,8 +363,9 @@ class TestTaskRequest:
 
     def test_create_minimal(self) -> None:
         """Should create with minimal fields."""
-        req = TaskRequest(persona="coder", task="test")
-        assert req.persona == "coder"
+        req = TaskRequest(task="test")
+        assert req.agent == "main"
+        assert req.persona == ""
         assert req.task == "test"
         assert req.tools == []
         assert req.skills == []
@@ -372,7 +373,8 @@ class TestTaskRequest:
     def test_create_full(self) -> None:
         """Should create with all fields."""
         req = TaskRequest(
-            persona="coder",
+            agent="researcher",
+            persona="Custom persona",
             task="test",
             tools=["execute_bash"],
             skills=["git-worktree"],
@@ -380,11 +382,13 @@ class TestTaskRequest:
             container="my-container",
             image="ubuntu:24.04",
         )
+        assert req.agent == "researcher"
+        assert req.persona == "Custom persona"
         assert req.model == "gpt-4"
         assert req.container == "my-container"
 
     def test_frozen(self) -> None:
         """Should be immutable."""
-        req = TaskRequest(persona="coder", task="test")
+        req = TaskRequest(task="test")
         with pytest.raises(AttributeError):
             req.task = "new"  # type: ignore[misc]
