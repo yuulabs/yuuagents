@@ -42,9 +42,10 @@ def app(agent_manager: AgentManager):
 
 
 @pytest.fixture
-def client(app) -> TestClient:
+def client(app):
     """Create test client."""
-    return TestClient(app)
+    with TestClient(app) as c:
+        yield c
 
 
 class TestHealthEndpoint:

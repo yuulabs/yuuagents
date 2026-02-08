@@ -68,3 +68,13 @@ class YAgentsClient:
     def scan_skills(self) -> list[dict[str, Any]]:
         resp = self._client.post("/api/skills/scan")
         return resp.json()
+
+    # -- config --
+
+    def get_config(self) -> dict[str, Any]:
+        return self._client.get("/api/config").json()
+
+    def reload_config(self) -> dict[str, Any]:
+        resp = self._client.post("/api/config/reload")
+        resp.raise_for_status()
+        return resp.json()

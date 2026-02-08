@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import msgspec
@@ -26,13 +27,29 @@ def _json(obj: Any, status: int = 200) -> Response:
 def create_app(manager: AgentManager) -> Starlette:
     """Build the Starlette ASGI app wired to *manager*."""
 
+    @asynccontextmanager
+    async def lifespan(app: Starlette):  # noqa: ARG001
+        await manager.start()
+        try:
+            yield
+        finally:
+            await manager.stop()
+
     async def health(request: Request) -> Response:
         return _json({"status": "ok"})
 
     async def create_agent(request: Request) -> Response:
         body = await request.body()
-        req = _task_decoder.decode(body)
-        agent_id = await manager.submit(req)
+        try:
+            req = _task_decoder.decode(body)
+        except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+            return _json({"error": str(exc)}, status=400)
+
+        try:
+            agent_id = await manager.submit(req)
+        except ValueError as exc:
+            return _json({"error": str(exc)}, status=400)
+
         return _json({"agent_id": agent_id}, status=201)
 
     async def list_agents(request: Request) -> Response:
@@ -102,6 +119,17 @@ def create_app(manager: AgentManager) -> Starlette:
             }
         )
 
+    async def reload_config(request: Request) -> Response:
+        """Hot-reload configuration from disk."""
+        from yuuagents.config import load as load_config
+
+        try:
+            new_config = load_config()
+            manager.reload_config(new_config)
+            return _json({"ok": True, "message": "Configuration reloaded successfully"})
+        except Exception as e:
+            return _json({"error": str(e)}, status=500)
+
     routes = [
         Route("/health", health, methods=["GET"]),
         Route("/api/agents", create_agent, methods=["POST"]),
@@ -113,7 +141,8 @@ def create_app(manager: AgentManager) -> Starlette:
         Route("/api/skills", list_skills, methods=["GET"]),
         Route("/api/skills/scan", scan_skills, methods=["POST"]),
         Route("/api/config", get_config, methods=["GET"]),
+        Route("/api/config/reload", reload_config, methods=["POST"]),
     ]
 
-    app = Starlette(routes=routes)
+    app = Starlette(routes=routes, lifespan=lifespan)
     return app

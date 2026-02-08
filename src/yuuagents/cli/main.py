@@ -300,6 +300,163 @@ def _image_exists(image: str) -> bool:
         return False
 
 
+# ── Configuration management ──
+
+
+@cli.command()
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to config.yaml (fully replaces current config)",
+)
+@click.option(
+    "--overrides",
+    "overrides_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to config.overrides.yaml (deep-merged on top)",
+)
+@click.pass_context
+def config(
+    ctx: click.Context,
+    config_path: str | None,
+    overrides_path: str | None,
+) -> None:
+    """View or update configuration (hot-reload without daemon restart).
+
+    \b
+    Usage:
+      yagents config                    # Print current config (from memory)
+      yagents config --overrides FILE   # Update config with overrides
+      yagents config --config FILE      # Replace config entirely
+
+    \b
+    This command updates both disk (~/.yagents/config.yaml) and the running
+    daemon's in-memory configuration without requiring a restart.
+    """
+    # No arguments: print current config from daemon
+    if not config_path and not overrides_path:
+        try:
+            cfg = load_config()
+            config_dict = {
+                "daemon": {
+                    "socket": cfg.daemon.socket,
+                    "log_level": cfg.daemon.log_level,
+                },
+                "docker": {
+                    "image": cfg.docker.image,
+                },
+                "skills": {
+                    "paths": cfg.skills.paths,
+                },
+                "tavily": {
+                    "api_key_env": cfg.tavily.api_key_env,
+                },
+                "providers": {
+                    name: {
+                        "kind": p.kind,
+                        "api_key_env": p.api_key_env,
+                        "default_model": p.default_model,
+                        "base_url": p.base_url,
+                        "organization": p.organization,
+                    }
+                    for name, p in cfg.providers.items()
+                },
+                "agents": {
+                    name: {
+                        "provider": a.provider,
+                        "model": a.model,
+                        "persona": a.persona,
+                        "tools": a.tools,
+                        "skills": a.skills,
+                    }
+                    for name, a in cfg.agents.items()
+                },
+            }
+            click.echo(yaml.dump(config_dict, default_flow_style=False, allow_unicode=True))
+        except Exception as e:
+            click.echo(f"Error loading config: {e}", err=True)
+            sys.exit(1)
+        return
+
+    # Update config: similar logic to setup command
+    if config_path:
+        click.echo(f"Config file:   {config_path}")
+        click.echo("WARNING: --config fully replaces the current configuration.")
+        if not click.confirm("Are you sure you want to proceed?"):
+            click.echo("Aborted.")
+            sys.exit(0)
+
+        user_config_p = Path(config_path)
+        user_data = yaml.safe_load(user_config_p.read_text(encoding="utf-8")) or {}
+
+        if overrides_path:
+            over_p = Path(overrides_path)
+            over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+            user_data = _deep_merge(user_data, over_data)
+            click.echo(f"Overrides:     {overrides_path}")
+
+        merged_data = user_data
+    else:
+        # Load current config and apply overrides
+        if not DEFAULT_CONFIG_PATH.exists():
+            click.echo(
+                f"Error: {DEFAULT_CONFIG_PATH} not found. Run `yagents setup` first.",
+                err=True,
+            )
+            sys.exit(1)
+
+        base_data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        click.echo(f"Base config:   {DEFAULT_CONFIG_PATH}")
+
+        if overrides_path:
+            over_p = Path(overrides_path)
+            over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+            base_data = _deep_merge(base_data, over_data)
+            click.echo(f"Overrides:     {overrides_path}")
+
+        merged_data = base_data
+
+    # Write to disk
+    click.echo()
+    click.echo("Updating configuration ...")
+    DEFAULT_CONFIG_PATH.write_text(
+        yaml.dump(merged_data, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    click.echo(f"  -> Written to {DEFAULT_CONFIG_PATH}")
+
+    # Validate
+    cfg = load_config()
+    errors = cfg.validate()
+    if errors:
+        click.echo("  WARNING: configuration has validation errors:", err=True)
+        for e in errors:
+            click.echo(f"    - {e}", err=True)
+
+    # Hot-reload daemon if running
+    click.echo()
+    click.echo("Reloading daemon configuration ...")
+    c = _client(ctx)
+    try:
+        c.health()
+        result = c.reload_config()
+        if result.get("ok"):
+            click.echo("  -> Daemon configuration reloaded successfully")
+        else:
+            click.echo(f"  WARNING: {result.get('error', 'Unknown error')}", err=True)
+    except Exception as e:
+        click.echo(f"  WARNING: Could not reload daemon (is it running?): {e}", err=True)
+        click.echo("  The config file has been updated, but you may need to restart the daemon.", err=True)
+    finally:
+        c.close()
+
+    click.echo()
+    click.echo("Configuration update complete!")
+
+
 # ── Daemon management ──
 
 

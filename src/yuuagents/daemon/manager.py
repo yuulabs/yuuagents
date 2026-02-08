@@ -71,9 +71,7 @@ class AgentManager:
             or req.agent
         )
         skills_xml = self._resolve_skills(
-            req.skills
-            if req.skills
-            else (agent_entry.skills if agent_entry else [])
+            req.skills if req.skills else (agent_entry.skills if agent_entry else [])
         )
 
         container_id = await self.docker.resolve(
@@ -100,7 +98,7 @@ class AgentManager:
 
         ctx = AgentContext(
             agent_id=agent_id,
-            workdir="/root",
+            workdir=self.docker.workdir,
             docker_container=container_id,
             docker=self.docker,
             tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
@@ -135,6 +133,9 @@ class AgentManager:
         await ctx.input_queue.put(content)
 
     async def cancel(self, agent_id: str) -> None:
+        if agent_id not in self._agents:
+            raise KeyError(agent_id)
+
         task = self._tasks.get(agent_id)
         if task and not task.done():
             task.cancel()
@@ -148,6 +149,18 @@ class AgentManager:
     def rescan_skills(self) -> list[SkillInfo]:
         self._skills = discovery.scan(self.config.skills.paths)
         return self._skills
+
+    def reload_config(self, new_config: Config) -> None:
+        """Hot-reload configuration without restarting daemon.
+
+        Updates the in-memory config and rescans skills if paths changed.
+        """
+        old_skill_paths = self.config.skills.paths
+        self.config = new_config
+
+        # Rescan skills if paths changed
+        if old_skill_paths != new_config.skills.paths:
+            self._skills = discovery.scan(self.config.skills.paths)
 
     # -- private helpers --
 

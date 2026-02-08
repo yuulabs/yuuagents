@@ -23,7 +23,7 @@ class TestDockerSystemPrompt:
         """Should contain Docker environment info."""
         assert "docker" in DOCKER_SYSTEM_PROMPT.lower()
         assert "/mnt/host" in DOCKER_SYSTEM_PROMPT
-        assert "/root" in DOCKER_SYSTEM_PROMPT
+        assert "/home/yuu" in DOCKER_SYSTEM_PROMPT
 
     def test_is_xml_formatted(self) -> None:
         """Should be XML-formatted."""
@@ -199,7 +199,7 @@ class TestDockerManagerExec:
 
             # Test pwd
             result = await manager.exec(container_id, "pwd", timeout=30)
-            assert "/root" in result
+            assert "/home/yuu" in result
 
             # Test ls
             result = await manager.exec(container_id, "ls -la", timeout=30)

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import aiodocker
+from aiodocker.exceptions import DockerError
 from attrs import define, field
 from loguru import logger
 
@@ -16,7 +18,7 @@ DOCKER_SYSTEM_PROMPT = """\
 <docker_environment>
 You are running commands inside a Docker container.
 - The host filesystem root is mounted read-only at /mnt/host
-- Your home directory /root is a persistent read-write workspace
+- Your home directory /home/yuu is a persistent read-write workspace
   (backed by a host directory specific to this container)
 - You can read any host file via /mnt/host/... but cannot modify the host directly.
 </docker_environment>"""
@@ -27,15 +29,37 @@ class DockerManager:
     """Manage Docker containers for agent bash/file tools."""
 
     image: str = "ubuntu:24.04"
+    container_home: str = "/home/yuu"
+    uid: int | None = None
+    gid: int | None = None
     default_container: str = ""
     _containers: dict[str, str] = field(factory=dict)
     _client: aiodocker.Docker | None = field(default=None, repr=False)
+    _start_lock: asyncio.Lock = field(factory=asyncio.Lock, repr=False)
+
+    @property
+    def workdir(self) -> str:
+        return self.container_home
+
+    def _user_spec(self) -> str:
+        uid = self.uid if self.uid is not None else os.getuid()
+        gid = self.gid if self.gid is not None else os.getgid()
+        return f"{uid}:{gid}"
+
+    async def _ensure_started(self) -> None:
+        if self._client is not None and self.default_container:
+            return
+
+        async with self._start_lock:
+            if self._client is not None and self.default_container:
+                return
+            self._client = aiodocker.Docker()
+            if not self.default_container:
+                self.default_container = await self._ensure_default()
+            logger.info("Docker ready, default container: {}", self.default_container)
 
     async def start(self) -> None:
-        self._client = aiodocker.Docker()
-        if not self.default_container:
-            self.default_container = await self._ensure_default()
-        logger.info("Docker ready, default container: {}", self.default_container)
+        await self._ensure_started()
 
     async def stop(self) -> None:
         # Clean up non-default containers we created
@@ -64,6 +88,7 @@ class DockerManager:
         - ``image`` given → create a new container from that image.
         - Both given → error.
         """
+        await self._ensure_started()
         if container and image:
             raise ValueError("Specify either --container or --image, not both")
 
@@ -90,20 +115,64 @@ class DockerManager:
 
     async def exec(self, container_id: str, command: str, timeout: int) -> str:
         """Run *command* in *container_id*, return stdout+stderr."""
-        assert self._client is not None
-        container = self._client.containers.container(container_id)
-        exe = await container.exec(
-            cmd=["bash", "-c", command],
-            stdout=True,
-            stderr=True,
-        )
-        try:
-            output = await asyncio.wait_for(exe.start(), timeout=timeout)  # type: ignore
-        except asyncio.TimeoutError:
-            return f"[ERROR] Command timed out after {timeout}s"
-        if isinstance(output, bytes):
+
+        await self._ensure_started()
+
+        async def _exec_with_shell(shell: str) -> str:
+            assert self._client is not None
+            container = self._client.containers.container(container_id)
+            exe = await container.exec(
+                cmd=[shell, "-c", command],
+                stdout=True,
+                stderr=True,
+                workdir=self.workdir,
+                environment={"HOME": self.container_home},
+            )
+
+            # aiodocker 0.25.0: Exec.start() is synchronous and returns a Stream.
+            # Older versions returned an awaitable; support both to keep behavior stable.
+            started = exe.start()
+            if asyncio.iscoroutine(started):  # pragma: no cover
+                stream = await started
+            else:
+                stream = started
+
+            async def _close_stream() -> None:
+                try:
+                    closed = stream.close()
+                    if asyncio.iscoroutine(closed):
+                        await closed
+                except Exception:
+                    pass
+
+            async def _read_all() -> bytes:
+                chunks: list[bytes] = []
+                try:
+                    while True:
+                        msg = await stream.read_out()
+                        if msg is None:
+                            break
+                        data = getattr(msg, "data", b"")
+                        if data:
+                            chunks.append(data)
+                finally:
+                    await _close_stream()
+                return b"".join(chunks)
+
+            try:
+                output = await asyncio.wait_for(_read_all(), timeout=timeout)
+            except asyncio.TimeoutError:
+                await _close_stream()
+                return f"[ERROR] Command timed out after {timeout}s"
+
             return output.decode("utf-8", errors="replace")
-        return str(output) if output else ""
+
+        # Prefer bash for the default Ubuntu container, but fall back to sh for
+        # minimal images (e.g. alpine) that don't ship bash.
+        result = await _exec_with_shell("bash")
+        if "executable file not found" in result and '"bash"' in result:
+            return await _exec_with_shell("sh")
+        return result
 
     async def cleanup(self, agent_id: str) -> None:
         """Remove a per-agent container (if we created one)."""
@@ -141,6 +210,8 @@ class DockerManager:
     ) -> str:
         assert self._client is not None
         image = image or self.image
+
+        await self._ensure_image(image)
         if not name:
             import uuid
 
@@ -150,14 +221,19 @@ class DockerManager:
         home_dir = _DOCKERS_ROOT / name
         home_dir.mkdir(parents=True, exist_ok=True)
 
+        container_home = self.container_home
+
         config: dict = {
             "Image": image,
             "Cmd": ["sleep", "infinity"],
             "Tty": False,
+            "Env": [f"HOME={container_home}"],
+            "WorkingDir": container_home,
+            "User": self._user_spec(),
             "HostConfig": {
                 "Binds": [
                     "/:/mnt/host:ro",
-                    f"{home_dir}:/root:rw",
+                    f"{home_dir}:{container_home}:rw",
                 ],
             },
         }
@@ -173,6 +249,26 @@ class DockerManager:
         cid = info["Id"]
         logger.info("Created container {} ({})", name, cid[:12])
         return cid
+
+    async def _ensure_image(self, image: str) -> None:
+        """Ensure *image* exists locally (pull if missing)."""
+        assert self._client is not None
+
+        try:
+            await self._client.images.inspect(image)
+            return
+        except DockerError as exc:
+            if getattr(exc, "status", None) != 404:
+                raise
+
+        # Pull missing image. Support "repo:tag" while keeping registry ports intact.
+        from_image = image
+        tag: str | None = None
+        if "@" not in image and ":" in image:
+            from_image, tag = image.rsplit(":", 1)
+
+        logger.info("Pulling Docker image {}", image)
+        await self._client.images.pull(from_image, tag=tag)
 
     async def _remove(self, container_id: str) -> None:
         assert self._client is not None
