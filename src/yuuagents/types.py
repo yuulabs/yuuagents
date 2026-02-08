@@ -17,6 +17,18 @@ class AgentStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class ErrorInfo(msgspec.Struct, frozen=True, kw_only=True):
+    """Structured error information with full stack trace in message.
+
+    The message field contains the complete error message including stack trace
+    for debugging purposes.
+    """
+
+    message: str  # Full error message with stack trace
+    error_type: str
+    timestamp: datetime
+
+
 class TaskRequest(msgspec.Struct, frozen=True, kw_only=True):
     """Payload for POST /api/agents."""
 
@@ -40,6 +52,7 @@ class AgentInfo(msgspec.Struct, frozen=True, kw_only=True):
     steps: int = 0
     total_tokens: int = 0
     total_cost_usd: float = 0.0
+    error: ErrorInfo | None = None
 
 
 class SkillInfo(msgspec.Struct, frozen=True, kw_only=True):

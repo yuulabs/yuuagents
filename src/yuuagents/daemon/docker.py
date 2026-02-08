@@ -26,21 +26,21 @@ You are running commands inside a Docker container.
 class DockerManager:
     """Manage Docker containers for agent bash/file tools."""
 
-    _image: str = "ubuntu:24.04"
-    _default_container: str = ""
+    image: str = "ubuntu:24.04"
+    default_container: str = ""
     _containers: dict[str, str] = field(factory=dict)
     _client: aiodocker.Docker | None = field(default=None, repr=False)
 
     async def start(self) -> None:
         self._client = aiodocker.Docker()
-        if not self._default_container:
-            self._default_container = await self._ensure_default()
-        logger.info("Docker ready, default container: {}", self._default_container)
+        if not self.default_container:
+            self.default_container = await self._ensure_default()
+        logger.info("Docker ready, default container: {}", self.default_container)
 
     async def stop(self) -> None:
         # Clean up non-default containers we created
         for agent_id, cid in list(self._containers.items()):
-            if cid != self._default_container:
+            if cid != self.default_container:
                 await self._remove(cid)
         self._containers.clear()
         if self._client:
@@ -49,7 +49,7 @@ class DockerManager:
 
     @property
     def default_container_id(self) -> str:
-        return self._default_container
+        return self.default_container
 
     async def resolve(
         self,
@@ -80,10 +80,13 @@ class DockerManager:
             return container
 
         if image:
-            return await self._create(image=image)
+            # Create a new container specifically for this agent
+            agent_id = ""
+            return await self._create(image=image, name="", agent_id=agent_id)
 
-        # Default shared container
-        return self._default_container
+        # No args → use default container
+        assert self.default_container
+        return self.default_container
 
     async def exec(self, container_id: str, command: str, timeout: int) -> str:
         """Run *command* in *container_id*, return stdout+stderr."""
@@ -95,7 +98,7 @@ class DockerManager:
             stderr=True,
         )
         try:
-            output = await asyncio.wait_for(exe.start(), timeout=timeout) #type: ignore
+            output = await asyncio.wait_for(exe.start(), timeout=timeout)  # type: ignore
         except asyncio.TimeoutError:
             return f"[ERROR] Command timed out after {timeout}s"
         if isinstance(output, bytes):
@@ -105,7 +108,7 @@ class DockerManager:
     async def cleanup(self, agent_id: str) -> None:
         """Remove a per-agent container (if we created one)."""
         cid = self._containers.pop(agent_id, None)
-        if cid and cid != self._default_container:
+        if cid and cid != self.default_container:
             await self._remove(cid)
 
     # -- private --
@@ -127,7 +130,7 @@ class DockerManager:
         except Exception:
             pass
 
-        return await self._create(image=self._image, name=name)
+        return await self._create(image=self.image, name=name)
 
     async def _create(
         self,
@@ -137,9 +140,10 @@ class DockerManager:
         agent_id: str = "",
     ) -> str:
         assert self._client is not None
-        image = image or self._image
+        image = image or self.image
         if not name:
             import uuid
+
             name = f"yagents-{uuid.uuid4().hex[:12]}"
 
         # Prepare host home directory for this container

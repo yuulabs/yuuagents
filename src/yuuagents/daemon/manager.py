@@ -14,7 +14,7 @@ import yuullm
 import yuutools as yt
 from attrs import define, field
 
-from yuuagents.agent import Agent
+from yuuagents.agent import Agent, AgentConfig, SimplePromptBuilder
 from yuuagents.config import Config
 from yuuagents.context import AgentContext
 from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT, DockerManager
@@ -28,23 +28,23 @@ from yuuagents.types import AgentInfo, AgentStatus, SkillInfo, TaskRequest
 class AgentManager:
     """Owns all running agents and their asyncio tasks."""
 
-    _config: Config
-    _docker: DockerManager
+    config: Config
+    docker: DockerManager
     _agents: dict[str, Agent] = field(factory=dict)
     _contexts: dict[str, AgentContext] = field(factory=dict)
     _tasks: dict[str, asyncio.Task] = field(factory=dict)
     _skills: list[SkillInfo] = field(factory=list)
 
     async def start(self) -> None:
-        await self._docker.start()
-        self._skills = discovery.scan(self._config.skills.paths)
+        await self.docker.start()
+        self._skills = discovery.scan(self.config.skills.paths)
 
     async def stop(self) -> None:
         for t in self._tasks.values():
             t.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
-        await self._docker.stop()
+        await self.docker.stop()
 
     # -- agent lifecycle --
 
@@ -58,26 +58,34 @@ class AgentManager:
         persona_text = self._resolve_persona(req.persona)
         skills_xml = self._resolve_skills(req.skills)
 
-        container_id = await self._docker.resolve(
+        container_id = await self.docker.resolve(
             container=req.container,
             image=req.image,
         )
 
-        agent = Agent(
+        # Build prompt using the new builder pattern
+        prompt_builder = SimplePromptBuilder()
+        prompt_builder.add_section(persona_text)
+        if DOCKER_SYSTEM_PROMPT:
+            prompt_builder.add_section(DOCKER_SYSTEM_PROMPT)
+        if skills_xml:
+            prompt_builder.add_section(skills_xml)
+
+        config = AgentConfig(
             agent_id=agent_id,
             persona=persona_text,
             tools=manager,
             llm=llm_client,
-            skills_xml=skills_xml,
-            docker_prompt=DOCKER_SYSTEM_PROMPT,
+            prompt_builder=prompt_builder,
         )
+        agent = Agent(config=config)
 
         ctx = AgentContext(
             agent_id=agent_id,
             workdir="/root",
             docker_container=container_id,
-            docker=self._docker,
-            tavily_api_key=os.environ.get(self._config.tavily.api_key_env, ""),
+            docker=self.docker,
+            tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
         )
 
         self._agents[agent_id] = agent
@@ -91,9 +99,9 @@ class AgentManager:
             await run_agent(agent, task, ctx)
         except asyncio.CancelledError:
             agent.status = AgentStatus.CANCELLED
-        except Exception:
+        except Exception as exc:
             logger.exception("Agent {} failed", agent.agent_id)
-            agent.status = AgentStatus.ERROR
+            agent.fail(exc)
 
     def list_agents(self) -> list[AgentInfo]:
         return [self._info(a) for a in self._agents.values()]
@@ -120,7 +128,7 @@ class AgentManager:
         return list(self._skills)
 
     def rescan_skills(self) -> list[SkillInfo]:
-        self._skills = discovery.scan(self._config.skills.paths)
+        self._skills = discovery.scan(self.config.skills.paths)
         return self._skills
 
     # -- private helpers --
@@ -135,31 +143,32 @@ class AgentManager:
             steps=agent.steps,
             total_tokens=agent.total_tokens,
             total_cost_usd=agent.total_cost_usd,
+            error=agent.error,
         )
 
     def _make_llm(self, model_override: str) -> yuullm.YLLMClient:
-        provider_name = self._config.llm.provider
-        api_key = os.environ.get(self._config.llm.api_key_env, "")
-        model = model_override or self._config.llm.default_model
+        provider_name = self.config.llm.provider
+        api_key = os.environ.get(self.config.llm.api_key_env, "")
+        model = model_override or self.config.llm.default_model
 
         if provider_name == "anthropic":
             provider = yuullm.providers.AnthropicProvider(api_key=api_key)
         else:
             kwargs: dict[str, Any] = {"api_key": api_key}
-            if self._config.llm.base_url:
-                kwargs["base_url"] = self._config.llm.base_url
+            if self.config.llm.base_url:
+                kwargs["base_url"] = self.config.llm.base_url
             provider = yuullm.providers.OpenAIProvider(**kwargs)
 
         return yuullm.YLLMClient(provider=provider, default_model=model)
 
     def _resolve_persona(self, persona: str) -> str:
-        cfg = self._config.personas.get(persona)
+        cfg = self.config.personas.get(persona)
         if cfg:
             return cfg.system_prompt
         return persona
 
     def _default_tools(self, persona: str) -> list[str]:
-        cfg = self._config.personas.get(persona)
+        cfg = self.config.personas.get(persona)
         if cfg and cfg.tools:
             return cfg.tools
         return ["execute_bash", "read_file", "write_file", "delete_file", "web_search"]

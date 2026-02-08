@@ -30,7 +30,7 @@ async def run(agent: Agent, task: str, ctx: AgentContext) -> None:
             try:
                 await _step(agent, chat, ctx)
             except Exception as exc:
-                agent.status = AgentStatus.ERROR
+                agent.fail(exc)
                 raise
 
 

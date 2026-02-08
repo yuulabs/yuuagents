@@ -83,14 +83,16 @@ def create_app(manager: AgentManager) -> Starlette:
 
     async def get_config(request: Request) -> Response:
         # Return sanitised config (no secrets)
-        cfg = manager._config
-        return _json({
-            "socket": cfg.daemon.socket,
-            "docker_image": cfg.docker.image,
-            "llm_provider": cfg.llm.provider,
-            "llm_default_model": cfg.llm.default_model,
-            "skill_paths": cfg.skills.paths,
-        })
+        cfg = manager.config
+        return _json(
+            {
+                "socket": cfg.daemon.socket,
+                "docker_image": cfg.docker.image,
+                "llm_provider": cfg.llm.provider,
+                "llm_default_model": cfg.llm.default_model,
+                "skill_paths": cfg.skills.paths,
+            }
+        )
 
     routes = [
         Route("/health", health, methods=["GET"]),
