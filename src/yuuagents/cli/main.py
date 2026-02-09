@@ -94,7 +94,7 @@ def setup(
     \b
     This command will:
       1. Write merged config to ~/.yagents/config.yaml.
-      2. Create required directories (~/.yagents/skills, ~/.yagents/dockers).
+      2. Create required directories (~/.yagents/skills, ~/.yagents/dockers, db parent).
       3. Install Docker if needed (prompts for sudo).
       4. Pull the Docker image specified in the config.
       5. Register yagents as a systemd user service.
@@ -191,6 +191,12 @@ def setup(
     ]
     for sp in cfg.skills.paths:
         dirs_to_create.append(Path(sp).expanduser())
+
+    db_url = cfg.db_url
+    sqlite_prefix = "sqlite+aiosqlite:///"
+    if db_url.startswith(sqlite_prefix):
+        db_path = Path(db_url[len(sqlite_prefix) :])
+        dirs_to_create.append(db_path.parent)
 
     for d in dirs_to_create:
         d.mkdir(parents=True, exist_ok=True)
@@ -338,6 +344,9 @@ def config(
         try:
             cfg = load_config()
             config_dict = {
+                "db": {
+                    "url": cfg.db.url,
+                },
                 "daemon": {
                     "socket": cfg.daemon.socket,
                     "log_level": cfg.daemon.log_level,

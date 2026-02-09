@@ -140,7 +140,7 @@ class DockerManager:
 
             async def _close_stream() -> None:
                 try:
-                    closed = stream.close() #type: ignore
+                    closed = stream.close()  # type: ignore
                     if asyncio.iscoroutine(closed):
                         await closed
                 except Exception:
@@ -150,7 +150,7 @@ class DockerManager:
                 chunks: list[bytes] = []
                 try:
                     while True:
-                        msg = await stream.read_out() #type:ignore
+                        msg = await stream.read_out()  # type:ignore
                         if msg is None:
                             break
                         data = getattr(msg, "data", b"")

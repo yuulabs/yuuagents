@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from loguru import logger
 
+import msgspec
 import yuullm
 import yuutools as yt
 from attrs import define, field
@@ -20,9 +21,10 @@ from yuuagents.config import Config, ProviderConfig
 from yuuagents.context import AgentContext
 from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT, DockerManager
 from yuuagents.loop import run as run_agent
+from yuuagents.persistence import TaskPersistence, TaskRecorder, TaskWriter
 from yuuagents.skills import discovery
 from yuuagents.tools import BUILTIN_TOOLS
-from yuuagents.types import AgentInfo, AgentStatus, SkillInfo, TaskRequest
+from yuuagents.types import AgentInfo, AgentStatus, ErrorInfo, SkillInfo, TaskRequest
 
 
 @define
@@ -31,20 +33,39 @@ class AgentManager:
 
     config: Config
     docker: DockerManager
+    db_url: str = ""
     _agents: dict[str, Agent] = field(factory=dict)
     _contexts: dict[str, AgentContext] = field(factory=dict)
     _tasks: dict[str, asyncio.Task] = field(factory=dict)
     _skills: list[SkillInfo] = field(factory=list)
+    _persistence: TaskPersistence | None = None
+    _writer: TaskWriter | None = None
+    _recorders: dict[str, TaskRecorder] = field(factory=dict)
 
     async def start(self) -> None:
         await self.docker.start()
         self._skills = discovery.scan(self.config.skills.paths)
+        db_url = self.db_url or self.config.db_url
+        self._persistence = TaskPersistence(db_url=db_url)
+        await self._persistence.start()
+        self._writer = TaskWriter(self._persistence)
+        await self._writer.start()
+        await self._restore_unfinished()
 
     async def stop(self) -> None:
         for t in self._tasks.values():
             t.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
+        self._agents.clear()
+        self._contexts.clear()
+        self._recorders.clear()
+        if self._writer is not None:
+            await self._writer.stop()
+            self._writer = None
+        if self._persistence is not None:
+            await self._persistence.stop()
+            self._persistence = None
         await self.docker.stop()
 
     # -- agent lifecycle --
@@ -87,6 +108,7 @@ class AgentManager:
             prompt_builder.add_section(DOCKER_SYSTEM_PROMPT)
         if skills_xml:
             prompt_builder.add_section(skills_xml)
+        system_prompt = prompt_builder.build()
 
         config = AgentConfig(
             task_id=task_id,
@@ -107,29 +129,92 @@ class AgentManager:
             tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
         )
 
+        if self._persistence is not None:
+            await self._persistence.create_task(
+                task_id=task_id,
+                agent_id=agent_id,
+                persona=persona_text,
+                task=req.task,
+                system_prompt=system_prompt,
+                model=llm_client.default_model,
+                tools=tool_names,
+                docker_container=container_id,
+                created_at=agent.created_at,
+            )
+
         self._agents[task_id] = agent
         self._contexts[task_id] = ctx
-        task = asyncio.create_task(self._run(agent, req.task, ctx))
+        task = asyncio.create_task(self._run(agent, req.task, ctx, resume=False))
         self._tasks[task_id] = task
         return task_id
 
-    async def _run(self, agent: Agent, task: str, ctx: AgentContext) -> None:
+    async def _run(
+        self, agent: Agent, task: str, ctx: AgentContext, *, resume: bool
+    ) -> None:
+        recorder = self._get_recorder(agent.task_id)
         try:
-            await run_agent(agent, task, ctx)
+            await run_agent(agent, task, ctx, recorder=recorder, resume=resume)
         except asyncio.CancelledError:
             agent.status = AgentStatus.CANCELLED
+            if self._writer is not None:
+                await self._writer.flush()
+            await self._write_terminal(agent.task_id, AgentStatus.CANCELLED, None)
         except Exception as exc:
             logger.exception("Task {} ({}) failed", agent.task_id, agent.agent_id)
             agent.fail(exc)
+            err = agent.error
+            err_json = msgspec.json.encode(err) if err is not None else None
+            if self._writer is not None:
+                await self._writer.flush()
+            await self._write_terminal(agent.task_id, AgentStatus.ERROR, err_json)
+        else:
+            if agent.status == AgentStatus.DONE:
+                if self._writer is not None:
+                    await self._writer.flush()
+                await self._write_terminal(agent.task_id, AgentStatus.DONE, None)
 
-    def list_agents(self) -> list[AgentInfo]:
-        return [self._info(a) for a in self._agents.values()]
+    async def list_agents(self) -> list[AgentInfo]:
+        if self._persistence is None:
+            return [self._info(a) for a in self._agents.values()]
+        infos = await self._persistence.list_tasks()
+        by_id = {i.task_id: i for i in infos}
+        for task_id, agent in self._agents.items():
+            by_id[task_id] = self._info(agent)
+        return list(by_id.values())
 
-    def status(self, task_id: str) -> AgentInfo:
-        return self._info(self._agents[task_id])
+    async def status(self, task_id: str) -> AgentInfo:
+        agent = self._agents.get(task_id)
+        if agent is not None:
+            return self._info(agent)
+        if self._persistence is None:
+            raise KeyError(task_id)
+        row = await self._persistence.get_task_row(task_id)
+        if row is None:
+            raise KeyError(task_id)
+        err: ErrorInfo | None = None
+        if row.error_json is not None:
+            err = msgspec.json.decode(row.error_json, type=ErrorInfo)
+        return AgentInfo(
+            task_id=row.task_id,
+            agent_id=row.agent_id,
+            persona=row.persona[:80],
+            task=row.task,
+            status=row.status,
+            created_at=row.created_at.isoformat(),
+            last_assistant_message="",
+            steps=row.head_turn,
+            total_tokens=0,
+            total_cost_usd=0.0,
+            error=err,
+        )
 
-    def history(self, task_id: str) -> list[Any]:
-        return self._agents[task_id].history
+    async def history(self, task_id: str) -> list[Any]:
+        agent = self._agents.get(task_id)
+        if agent is not None:
+            return agent.history
+        if self._persistence is None:
+            raise KeyError(task_id)
+        return await self._persistence.load_history(task_id)
 
     async def respond(self, task_id: str, content: str) -> None:
         ctx = self._contexts[task_id]
@@ -145,6 +230,7 @@ class AgentManager:
         agent = self._agents.get(task_id)
         if agent:
             agent.status = AgentStatus.CANCELLED
+        await self._write_terminal(task_id, AgentStatus.CANCELLED, None)
 
     def skills(self) -> list[SkillInfo]:
         return list(self._skills)
@@ -166,6 +252,84 @@ class AgentManager:
             self._skills = discovery.scan(self.config.skills.paths)
 
     # -- private helpers --
+    def _get_recorder(self, task_id: str) -> TaskRecorder | None:
+        if self._writer is None:
+            return None
+        existing = self._recorders.get(task_id)
+        if existing is not None:
+            return existing
+        rec = TaskRecorder(task_id=task_id, writer=self._writer)
+        self._recorders[task_id] = rec
+        return rec
+
+    async def _write_terminal(
+        self, task_id: str, status: AgentStatus, error_json: bytes | None
+    ) -> None:
+        if self._persistence is None:
+            return
+        if status in (AgentStatus.ERROR, AgentStatus.CANCELLED, AgentStatus.DONE):
+            await self._persistence.update_task_terminal(
+                task_id=task_id,
+                status=status,
+                error_json=error_json,
+            )
+
+    async def _restore_unfinished(self) -> None:
+        if self._persistence is None:
+            return
+
+        restored = await self._persistence.load_unfinished()
+        recovered_any = False
+        for t in restored:
+            if t.status == AgentStatus.BLOCKED_ON_INPUT:
+                recovered_any = (
+                    recovered_any
+                    or await self._persistence.recover_pending_tools(t.task_id)
+                )
+        if recovered_any:
+            restored = await self._persistence.load_unfinished()
+
+        for t in restored:
+            llm_client = self._make_llm(agent_name=t.agent_id, model_override=t.model)
+            tool_names = t.tools or self._default_tools(t.agent_id)
+            tool_objs = [BUILTIN_TOOLS[n] for n in tool_names if n in BUILTIN_TOOLS]
+            manager = yt.ToolManager(tool_objs)
+
+            prompt_builder = SimplePromptBuilder()
+            prompt_builder.add_section(t.system_prompt)
+
+            config = AgentConfig(
+                task_id=t.task_id,
+                agent_id=t.agent_id,
+                persona=t.persona,
+                tools=manager,
+                llm=llm_client,
+                prompt_builder=prompt_builder,
+            )
+            agent = Agent(config=config)
+            agent.state.task = t.task
+            agent.state.history = t.history
+            agent.state.status = t.status
+            agent.state.steps = t.head_turn
+            agent.state.created_at = t.created_at
+
+            container_id = await self.docker.resolve(
+                task_id=t.task_id,
+                container=t.docker_container,
+            )
+            ctx = AgentContext(
+                task_id=t.task_id,
+                agent_id=t.agent_id,
+                workdir=self.docker.workdir,
+                docker_container=container_id,
+                docker=self.docker,
+                tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
+            )
+
+            self._agents[t.task_id] = agent
+            self._contexts[t.task_id] = ctx
+            task = asyncio.create_task(self._run(agent, t.task, ctx, resume=True))
+            self._tasks[t.task_id] = task
 
     def _last_assistant_message(self, agent: Agent) -> str:
         for msg in reversed(agent.history):
@@ -189,7 +353,7 @@ class AgentManager:
                     and item.get("type") == "tool_call"
                     and isinstance(item.get("name"), str)
                 ):
-                    tool_names.append(item["name"]) #type:ignore
+                    tool_names.append(item["name"])  # type:ignore
 
             text = "".join(text_parts).strip()
             if text:

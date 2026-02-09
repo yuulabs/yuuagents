@@ -30,6 +30,9 @@ dependencies = [
     "loguru>=0.7.0",
     # Config
     "pyyaml>=6.0",
+    # Persistence (async ORM)
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.21.0",
 ]
 
 [project.scripts]

@@ -148,7 +148,7 @@ class TestAgentLifecycle:
         manager = AgentManager(cfg, docker)
         manager._agents[agent.task_id] = agent
 
-        info = manager.status(agent.task_id)
+        info = await manager.status(agent.task_id)
         assert info.last_assistant_message == "final answer"
 
     async def test_manager_make_llm_sets_price_calculator_by_default(self) -> None:
@@ -376,11 +376,15 @@ class TestContextCreation:
 class TestManagerIntegration:
     """Integration tests for AgentManager — requires Docker."""
 
-    async def test_manager_lifecycle(self) -> None:
+    async def test_manager_lifecycle(self, tmp_path) -> None:
         """Should start and stop properly."""
         config = Config()
         docker = DockerManager(image=config.docker.image)
-        manager = AgentManager(config, docker)
+        manager = AgentManager(
+            config=config,
+            docker=docker,
+            db_url=f"sqlite+aiosqlite:///{tmp_path / 'tasks.sqlite3'}",
+        )
 
         try:
             await manager.start()
@@ -388,11 +392,15 @@ class TestManagerIntegration:
         finally:
             await manager.stop()
 
-    async def test_submit_agent(self) -> None:
+    async def test_submit_agent(self, tmp_path) -> None:
         """Should submit new agent."""
         config = Config()
         docker = DockerManager(image=config.docker.image)
-        manager = AgentManager(config, docker)
+        manager = AgentManager(
+            config=config,
+            docker=docker,
+            db_url=f"sqlite+aiosqlite:///{tmp_path / 'tasks.sqlite3'}",
+        )
 
         try:
             await manager.start()
@@ -407,18 +415,22 @@ class TestManagerIntegration:
             assert len(task_id) > 0
 
             # Should be in list
-            agents = manager.list_agents()
+            agents = await manager.list_agents()
             assert len(agents) == 1
             assert agents[0].task_id == task_id
             assert agents[0].agent_id == "main"
         finally:
             await manager.stop()
 
-    async def test_cancel_agent(self) -> None:
+    async def test_cancel_agent(self, tmp_path) -> None:
         """Should cancel agent."""
         config = Config()
         docker = DockerManager(image=config.docker.image)
-        manager = AgentManager(config, docker)
+        manager = AgentManager(
+            config=config,
+            docker=docker,
+            db_url=f"sqlite+aiosqlite:///{tmp_path / 'tasks.sqlite3'}",
+        )
 
         try:
             await manager.start()
@@ -435,7 +447,7 @@ class TestManagerIntegration:
             await manager.cancel(task_id)
 
             # Check status
-            info = manager.status(task_id)
+            info = await manager.status(task_id)
             assert info.status == "cancelled"
         finally:
             await manager.stop()

@@ -69,12 +69,12 @@ def create_app(
         return _json({"task_id": task_id, "agent_id": req.agent}, status=201)
 
     async def list_agents(request: Request) -> Response:
-        return _json(manager.list_agents())
+        return _json(await manager.list_agents())
 
     async def get_agent(request: Request) -> Response:
         task_id = request.path_params["task_id"]
         try:
-            info = manager.status(task_id)
+            info = await manager.status(task_id)
         except KeyError:
             return _json({"error": "not found"}, status=404)
         return _json(info)
@@ -82,7 +82,7 @@ def create_app(
     async def get_history(request: Request) -> Response:
         task_id = request.path_params["task_id"]
         try:
-            hist = manager.history(task_id)
+            hist = await manager.history(task_id)
         except KeyError:
             return _json({"error": "not found"}, status=404)
         serializable = [{"role": role, "items": items} for role, items in hist]

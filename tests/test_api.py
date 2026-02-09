@@ -24,9 +24,16 @@ def docker_manager(config: Config) -> DockerManager:
 
 
 @pytest.fixture
-def agent_manager(config: Config, docker_manager: DockerManager) -> AgentManager:
+def db_url(tmp_path) -> str:
+    return f"sqlite+aiosqlite:///{tmp_path / 'tasks.sqlite3'}"
+
+
+@pytest.fixture
+def agent_manager(
+    config: Config, docker_manager: DockerManager, db_url: str
+) -> AgentManager:
     """Create AgentManager with real dependencies."""
-    return AgentManager(config, docker_manager)
+    return AgentManager(config=config, docker=docker_manager, db_url=db_url)
 
 
 @pytest.fixture

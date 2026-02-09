@@ -16,7 +16,7 @@ from yuuagents.daemon.manager import AgentManager
 async def serve(config: Config) -> None:
     """Start the daemon: Docker manager, agent manager, HTTP server."""
     docker = DockerManager(image=config.docker.image)
-    manager = AgentManager(config=config, docker=docker)
+    manager = AgentManager(config=config, docker=docker, db_url=config.db_url)
     await manager.start()
 
     server: uvicorn.Server | None = None
@@ -42,9 +42,7 @@ async def serve(config: Config) -> None:
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(
-            sig, lambda: asyncio.create_task(_shutdown(server))
-        )
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown(server)))
 
     try:
         await server.serve()

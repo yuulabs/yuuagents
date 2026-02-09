@@ -11,12 +11,21 @@ import yuutrace as ytrace
 
 from yuuagents.agent import Agent
 from yuuagents.context import AgentContext
+from yuuagents.persistence import TaskRecorder, ToolCallDTO, ToolErrorDTO, ToolResultDTO
 from yuuagents.types import AgentStatus
 
 
-async def run(agent: Agent, task: str, ctx: AgentContext) -> None:
+async def run(
+    agent: Agent,
+    task: str,
+    ctx: AgentContext,
+    *,
+    recorder: TaskRecorder | None = None,
+    resume: bool = False,
+) -> None:
     """Run the agent loop until completion or error."""
-    agent.setup(task)
+    if not resume:
+        agent.setup(task)
 
     ytrace.init(service_name="yuuagents")
     with ytrace.conversation(
@@ -25,18 +34,22 @@ async def run(agent: Agent, task: str, ctx: AgentContext) -> None:
         model=agent.llm.default_model,
     ) as chat:
         chat.system(persona=agent.full_system_prompt, tools=agent.tools.specs())
-        chat.user(task)
+        chat.user(task if not resume else agent.task)
 
         while not agent.done():
             try:
-                await _step(agent, chat, ctx)
+                await _step(agent, chat, ctx, recorder=recorder)
             except Exception as exc:
                 agent.fail(exc)
                 raise
 
 
 async def _step(
-    agent: Agent, chat: ytrace.ConversationContext, ctx: AgentContext
+    agent: Agent,
+    chat: ytrace.ConversationContext,
+    ctx: AgentContext,
+    *,
+    recorder: TaskRecorder | None = None,
 ) -> None:
     """Execute one LLM call + tool round."""
     # 1. Call LLM
@@ -112,7 +125,20 @@ async def _step(
         )
 
     if assistant_items:
-        agent.history.append(yuullm.assistant(*assistant_items))
+        assistant_msg = yuullm.assistant(*assistant_items)
+        agent.history.append(assistant_msg)
+    else:
+        assistant_msg = None
+
+    if recorder is not None:
+        await recorder.record_llm(
+            turn=agent.steps,
+            history_append=assistant_msg,
+            tool_calls=[
+                ToolCallDTO(call_id=tc.id, name=tc.name, args_json=tc.arguments or "")
+                for tc in tool_calls
+            ],
+        )
 
     # 3. If no tool calls, we're done
     if not tool_calls:
@@ -139,3 +165,24 @@ async def _step(
     for r in results:
         content = str(r.error) if r.error else str(r.output)
         agent.history.append(yuullm.tool(r.tool_call_id, content))
+
+    if recorder is not None:
+        await recorder.record_tool(
+            turn=agent.steps,
+            results=[
+                ToolResultDTO(
+                    call_id=r.tool_call_id,
+                    ok=r.error is None,
+                    output_text=str(r.output) if r.error is None else "",
+                    error=(
+                        None
+                        if r.error is None
+                        else ToolErrorDTO(
+                            type=type(r.error).__name__,
+                            message=str(r.error),
+                        )
+                    ),
+                )
+                for r in results
+            ],
+        )

@@ -15,7 +15,7 @@ from yuuagents.daemon.docker import (
 
 
 @pytest_asyncio.fixture
-async def started_docker_manager() -> DockerManager: #type:ignore
+async def started_docker_manager() -> DockerManager:  # type:ignore
     manager = DockerManager()
     await manager.start()
     try:
@@ -24,9 +24,7 @@ async def started_docker_manager() -> DockerManager: #type:ignore
         await manager.stop()
 
 
-
 class TestDockerSystemPrompt:
-
     def test_is_string(self) -> None:
         """Should be a string."""
         assert isinstance(DOCKER_SYSTEM_PROMPT, str)
@@ -155,7 +153,9 @@ class TestDockerManagerResolve:
 class TestDockerManagerExec:
     """Tests for exec() method — requires Docker."""
 
-    async def test_exec_runs_command(self, started_docker_manager: DockerManager) -> None:
+    async def test_exec_runs_command(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """exec() should run command in container."""
         manager = started_docker_manager
         container_id = manager.default_container_id
@@ -247,9 +247,7 @@ class TestDockerManagerProperties:
 class TestDockerManagerConcurrency:
     """Tests for concurrent operations — requires Docker."""
 
-    async def test_concurrent_exec(
-        self, started_docker_manager: DockerManager
-    ) -> None:
+    async def test_concurrent_exec(self, started_docker_manager: DockerManager) -> None:
         """Should handle concurrent exec calls."""
         manager = started_docker_manager
         container_id = manager.default_container_id

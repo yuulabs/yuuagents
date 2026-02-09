@@ -12,6 +12,14 @@
 # Runtime config location:  ~/.yagents/config.yaml
 # ============================================================================
 
+# -- Database ----------------------------------------------------------------
+#
+# Task persistence uses an async SQLAlchemy engine. Default is sqlite (file).
+#
+db:
+  # SQLAlchemy async URL. For sqlite, you can use a local file path URL.
+  url: sqlite+aiosqlite:///~/.yagents/tasks.sqlite3
+
 # -- Daemon -------------------------------------------------------------------
 
 daemon:

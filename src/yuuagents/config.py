@@ -44,6 +44,10 @@ class TavilyConfig(msgspec.Struct, kw_only=True):
     api_key_env: str = "TAVILY_API_KEY"
 
 
+class DbConfig(msgspec.Struct, kw_only=True):
+    url: str = "sqlite+aiosqlite:///~/.yagents/tasks.sqlite3"
+
+
 class PricingEntry(msgspec.Struct, kw_only=True):
     """Per-model pricing override (USD per million tokens)."""
 
@@ -92,6 +96,7 @@ class AgentEntry(msgspec.Struct, kw_only=True):
 
 class Config(msgspec.Struct, kw_only=True):
     daemon: DaemonConfig = msgspec.field(default_factory=DaemonConfig)
+    db: DbConfig = msgspec.field(default_factory=DbConfig)
     docker: DockerConfig = msgspec.field(default_factory=DockerConfig)
     skills: SkillsConfig = msgspec.field(default_factory=SkillsConfig)
     tavily: TavilyConfig = msgspec.field(default_factory=TavilyConfig)
@@ -102,9 +107,21 @@ class Config(msgspec.Struct, kw_only=True):
     def socket_path(self) -> Path:
         return Path(self.daemon.socket).expanduser()
 
+    @property
+    def db_url(self) -> str:
+        url = self.db.url
+        prefix = "sqlite+aiosqlite:///"
+        if url.startswith(prefix):
+            path = url[len(prefix) :]
+            if path.startswith("~"):
+                return prefix + str(Path(path).expanduser())
+        return url
+
     def validate(self) -> list[str]:
         """Check referential integrity.  Returns a list of error messages."""
         errors: list[str] = []
+        if not self.db.url:
+            errors.append("db.url must not be empty")
         for agent_name, entry in self.agents.items():
             if entry.provider and entry.provider not in self.providers:
                 errors.append(

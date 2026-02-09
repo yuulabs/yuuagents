@@ -11,6 +11,7 @@ from yuuagents.config import (
     AgentEntry,
     Config,
     DaemonConfig,
+    DbConfig,
     DockerConfig,
     PricingEntry,
     ProviderConfig,
@@ -73,6 +74,16 @@ class TestTavilyConfig:
     def test_custom_env(self) -> None:
         cfg = TavilyConfig(api_key_env="MY_TAVILY_KEY")
         assert cfg.api_key_env == "MY_TAVILY_KEY"
+
+
+class TestDbConfig:
+    def test_default_values(self) -> None:
+        cfg = DbConfig()
+        assert cfg.url == "sqlite+aiosqlite:///~/.yagents/tasks.sqlite3"
+
+    def test_custom_url(self) -> None:
+        cfg = DbConfig(url="sqlite+aiosqlite:////tmp/x.sqlite3")
+        assert cfg.url == "sqlite+aiosqlite:////tmp/x.sqlite3"
 
 
 class TestPricingEntry:
@@ -171,6 +182,7 @@ class TestConfig:
     def test_default_values(self) -> None:
         cfg = Config()
         assert isinstance(cfg.daemon, DaemonConfig)
+        assert isinstance(cfg.db, DbConfig)
         assert isinstance(cfg.docker, DockerConfig)
         assert isinstance(cfg.skills, SkillsConfig)
         assert isinstance(cfg.tavily, TavilyConfig)
@@ -189,6 +201,11 @@ class TestConfig:
         path = cfg.socket_path
         assert str(path).startswith("/")
         assert path.name == "custom.sock"
+
+    def test_db_url_expansion(self) -> None:
+        cfg = Config(db=DbConfig(url="sqlite+aiosqlite:///~/.yagents/x.sqlite3"))
+        assert cfg.db_url.startswith("sqlite+aiosqlite:///")
+        assert "~" not in cfg.db_url
 
     def test_with_providers_and_agents(self) -> None:
         cfg = Config(
