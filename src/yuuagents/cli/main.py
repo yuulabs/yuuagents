@@ -485,9 +485,8 @@ def stop(ctx: click.Context) -> None:
     c = _client(ctx)
     try:
         c.health()
-        click.echo("Sending shutdown signal...")
-        click.echo("Use `yagents down` to stop and unregister the service,")
-        click.echo("or `systemctl --user stop yagents` to stop the daemon.")
+        c.shutdown()
+        click.echo("Shutdown requested.")
     except Exception:
         click.echo("Daemon is not running.")
     finally:
@@ -616,8 +615,17 @@ def logs(ctx: click.Context, task_id: str) -> None:
     try:
         hist = c.history(task_id)
         for msg in hist:
-            role = msg.get("role", "?")
-            items = msg.get("items", [])
+            role: str = "?"
+            items: list[object] = []
+            if isinstance(msg, dict):
+                role = str(msg.get("role", "?"))
+                raw_items = msg.get("items", [])
+                items = raw_items if isinstance(raw_items, list) else []
+            elif isinstance(msg, (list, tuple)) and len(msg) == 2:
+                role = str(msg[0])
+                raw_items = msg[1]
+                items = raw_items if isinstance(raw_items, list) else []
+
             click.echo(f"\n--- {role} ---")
             for item in items:
                 if isinstance(item, str):

@@ -174,9 +174,6 @@ class AgentManager:
 
             if isinstance(msg, tuple) and len(msg) == 2:
                 role, items = msg
-            elif isinstance(msg, dict):
-                role = msg.get("role")
-                items = msg.get("items")
 
             if role != "assistant" or not isinstance(items, list):
                 continue

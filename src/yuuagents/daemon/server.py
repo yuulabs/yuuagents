@@ -19,7 +19,14 @@ async def serve(config: Config) -> None:
     manager = AgentManager(config=config, docker=docker)
     await manager.start()
 
-    app = create_app(manager)
+    server: uvicorn.Server | None = None
+
+    def request_shutdown() -> None:
+        nonlocal server
+        if server is not None:
+            server.should_exit = True
+
+    app = create_app(manager, request_shutdown=request_shutdown)
     sock_path = config.socket_path
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     if sock_path.exists():
@@ -36,7 +43,7 @@ async def serve(config: Config) -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(
-            sig, lambda: asyncio.create_task(_shutdown(server, manager))
+            sig, lambda: asyncio.create_task(_shutdown(server))
         )
 
     try:
@@ -47,6 +54,5 @@ async def serve(config: Config) -> None:
             sock_path.unlink()
 
 
-async def _shutdown(server: uvicorn.Server, manager: AgentManager) -> None:
-    await manager.stop()
+async def _shutdown(server: uvicorn.Server) -> None:
     server.should_exit = True

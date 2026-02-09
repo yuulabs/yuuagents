@@ -32,7 +32,7 @@ def agent_manager(config: Config, docker_manager: DockerManager) -> AgentManager
 @pytest.fixture
 def app(agent_manager: AgentManager):
     """Create Starlette app with real manager."""
-    return create_app(agent_manager)
+    return create_app(agent_manager, manage_lifecycle=True)
 
 
 @pytest.fixture

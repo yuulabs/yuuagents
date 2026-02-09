@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Callable
 
 import msgspec
 from starlette.applications import Starlette
@@ -24,19 +24,35 @@ def _json(obj: Any, status: int = 200) -> Response:
     return Response(content=body, status_code=status, media_type="application/json")
 
 
-def create_app(manager: AgentManager) -> Starlette:
+def create_app(
+    manager: AgentManager,
+    request_shutdown: Callable[[], None] | None = None,
+    *,
+    manage_lifecycle: bool = False,
+) -> Starlette:
     """Build the Starlette ASGI app wired to *manager*."""
+    if request_shutdown is None:
 
-    @asynccontextmanager
-    async def lifespan(app: Starlette):  # noqa: ARG001
-        await manager.start()
-        try:
-            yield
-        finally:
-            await manager.stop()
+        def request_shutdown() -> None:
+            return None
+
+    lifespan = None
+    if manage_lifecycle:
+
+        @asynccontextmanager
+        async def lifespan(app: Starlette):  # noqa: ARG001
+            await manager.start()
+            try:
+                yield
+            finally:
+                await manager.stop()
 
     async def health(request: Request) -> Response:
         return _json({"status": "ok"})
+
+    async def shutdown(request: Request) -> Response:
+        request_shutdown()
+        return _json({"ok": True})
 
     async def create_agent(request: Request) -> Response:
         body = await request.body()
@@ -69,7 +85,6 @@ def create_app(manager: AgentManager) -> Starlette:
             hist = manager.history(task_id)
         except KeyError:
             return _json({"error": "not found"}, status=404)
-        # History is list[Message] = list[tuple[str, list[Item]]]
         serializable = [{"role": role, "items": items} for role, items in hist]
         return JSONResponse(serializable)
 
@@ -132,6 +147,7 @@ def create_app(manager: AgentManager) -> Starlette:
 
     routes = [
         Route("/health", health, methods=["GET"]),
+        Route("/api/shutdown", shutdown, methods=["POST"]),
         Route("/api/agents", create_agent, methods=["POST"]),
         Route("/api/agents", list_agents, methods=["GET"]),
         Route("/api/agents/{task_id}", get_agent, methods=["GET"]),

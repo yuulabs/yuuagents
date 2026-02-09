@@ -27,6 +27,11 @@ class YAgentsClient:
     def health(self) -> dict[str, Any]:
         return self._client.get("/health").json()
 
+    def shutdown(self) -> dict[str, Any]:
+        resp = self._client.post("/api/shutdown")
+        resp.raise_for_status()
+        return resp.json()
+
     # -- agents --
 
     def submit(self, payload: dict[str, Any]) -> dict[str, Any]:
