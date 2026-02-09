@@ -51,7 +51,7 @@ def install() -> str:
     path_env = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
 
     unit_content = _UNIT_TEMPLATE.format(
-        exec_start=f"{yagents_bin} start",
+        exec_start=f"{yagents_bin} up",
         path_env=path_env,
     )
 
@@ -64,6 +64,14 @@ def install() -> str:
     _systemctl("start", _UNIT_NAME)
 
     return str(_UNIT_PATH)
+
+
+def start(*, ignore_errors: bool = False) -> None:
+    _systemctl("start", _UNIT_NAME, ignore_errors=ignore_errors)
+
+
+def stop(*, ignore_errors: bool = False) -> None:
+    _systemctl("stop", _UNIT_NAME, ignore_errors=ignore_errors)
 
 
 def uninstall() -> None:

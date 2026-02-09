@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+import shutil
 
 import click
 import yaml
@@ -52,7 +53,7 @@ def cli(ctx: click.Context, socket: str | None) -> None:
         ctx.obj = str(cfg.socket_path)
 
 
-# ── Setup ──
+# ── Install ──
 
 
 @cli.command()
@@ -76,14 +77,22 @@ def cli(ctx: click.Context, socket: str | None) -> None:
     type=click.Path(exists=True, file_okay=False),
     help="Project root containing config.example.yaml (default: auto-detect)",
 )
+@click.option(
+    "-s",
+    "--systemd",
+    is_flag=True,
+    default=False,
+    help="Register yagents as a systemd user service",
+)
 @click.pass_context
-def setup(
+def install(
     ctx: click.Context,
     config_path: str | None,
     overrides_path: str | None,
     project_dir: str | None,
+    systemd: bool,
 ) -> None:
-    """One-time setup: install config, create directories, pull Docker, register service.
+    """One-time install: install config, create directories, pull Docker.
 
     \b
     Config resolution order:
@@ -97,8 +106,11 @@ def setup(
       2. Create required directories (~/.yagents/skills, ~/.yagents/dockers, db parent).
       3. Install Docker if needed (prompts for sudo).
       4. Pull the Docker image specified in the config.
+
+    If ``--systemd`` is provided, it will also:
       5. Register yagents as a systemd user service.
     """
+    total_steps = 4 if systemd else 3
     # -- Step 0: resolve config sources --
     if config_path:
         # User provided a full config — requires confirmation
@@ -162,7 +174,7 @@ def setup(
 
     # -- Step 1: write config --
     click.echo()
-    click.echo("[1/4] Installing configuration ...")
+    click.echo(f"[1/{total_steps}] Installing configuration ...")
 
     YAGENTS_HOME.mkdir(parents=True, exist_ok=True)
     DEFAULT_CONFIG_PATH.write_text(
@@ -183,7 +195,7 @@ def setup(
 
     # -- Step 2: create directories --
     click.echo()
-    click.echo("[2/4] Creating directories ...")
+    click.echo(f"[2/{total_steps}] Creating directories ...")
 
     dirs_to_create = [
         YAGENTS_HOME / "skills",
@@ -204,7 +216,7 @@ def setup(
 
     # -- Step 3: Docker --
     click.echo()
-    click.echo("[3/4] Setting up Docker ...")
+    click.echo(f"[3/{total_steps}] Setting up Docker ...")
 
     image = cfg.docker.image
     click.echo(f"  Image: {image}")
@@ -236,26 +248,26 @@ def setup(
             else:
                 click.echo(f"  Image {image} pulled successfully.")
 
-    # -- Step 4: systemd service --
-    click.echo()
-    click.echo("[4/4] Registering systemd user service ...")
+    if systemd:
+        click.echo()
+        click.echo(f"[4/{total_steps}] Registering systemd user service ...")
 
-    try:
-        from yuuagents.cli.service import install as install_service
+        try:
+            from yuuagents.cli.service import install as install_service
 
-        unit_path = install_service()
-        click.echo(f"  Service installed: {unit_path}")
-        click.echo("  Service enabled and started.")
-    except FileNotFoundError as e:
-        click.echo(f"  WARNING: {e}", err=True)
-        click.echo("  You can start the daemon manually: yagents start", err=True)
-    except RuntimeError as e:
-        click.echo(f"  WARNING: {e}", err=True)
-        click.echo("  You can start the daemon manually: yagents start", err=True)
+            unit_path = install_service()
+            click.echo(f"  Service installed: {unit_path}")
+            click.echo("  Service enabled and started.")
+        except FileNotFoundError as e:
+            click.echo(f"  WARNING: {e}", err=True)
+            click.echo("  You can start the daemon manually: yagents up", err=True)
+        except RuntimeError as e:
+            click.echo(f"  WARNING: {e}", err=True)
+            click.echo("  You can start the daemon manually: yagents up", err=True)
 
     # -- Done --
     click.echo()
-    click.echo("Setup complete!")
+    click.echo("Install complete!")
     click.echo()
 
     # Show next steps based on first provider
@@ -275,6 +287,39 @@ def setup(
         click.echo(
             '  3. Run an agent:          yagents run --agent main --task "hello world"'
         )
+
+
+@cli.command()
+@click.pass_context
+def uninstall(ctx: click.Context) -> None:
+    """Uninstall yagents: stop daemon, unregister systemd service, remove config."""
+    click.echo("Stopping daemon ...")
+    c = _client(ctx)
+    try:
+        c.health()
+        c.shutdown()
+        click.echo("  -> Shutdown requested.")
+    except Exception:
+        click.echo("  -> Daemon is not running.")
+    finally:
+        c.close()
+
+    click.echo("Unregistering systemd user service ...")
+    try:
+        from yuuagents.cli.service import uninstall as uninstall_service
+
+        uninstall_service()
+        click.echo("  -> Service unregistered.")
+    except RuntimeError as e:
+        click.echo(f"  WARNING: {e}", err=True)
+
+    if DEFAULT_CONFIG_PATH.exists():
+        DEFAULT_CONFIG_PATH.unlink()
+        click.echo(f"Removed config: {DEFAULT_CONFIG_PATH}")
+    else:
+        click.echo(f"Config not found: {DEFAULT_CONFIG_PATH}")
+
+    click.echo("Uninstall complete.")
 
 
 def _docker_available() -> bool:
@@ -389,7 +434,7 @@ def config(
             sys.exit(1)
         return
 
-    # Update config: similar logic to setup command
+    # Update config: similar logic to install command
     if config_path:
         click.echo(f"Config file:   {config_path}")
         click.echo("WARNING: --config fully replaces the current configuration.")
@@ -411,7 +456,7 @@ def config(
         # Load current config and apply overrides
         if not DEFAULT_CONFIG_PATH.exists():
             click.echo(
-                f"Error: {DEFAULT_CONFIG_PATH} not found. Run `yagents setup` first.",
+                f"Error: {DEFAULT_CONFIG_PATH} not found. Run `yagents install` first.",
                 err=True,
             )
             sys.exit(1)
@@ -477,9 +522,39 @@ def config(
 
 @cli.command()
 @click.option("--config", "config_path", default=None, help="Config file path")
+@click.option("-d", "--daemon", is_flag=True, default=False, help="Run in background")
 @click.pass_context
-def start(ctx: click.Context, config_path: str | None) -> None:
-    """Start the yagents daemon (foreground)."""
+def up(ctx: click.Context, config_path: str | None, daemon: bool) -> None:
+    """Start the yagents daemon."""
+    if daemon:
+        try:
+            from yuuagents.cli.service import start as start_service
+
+            start_service()
+            click.echo("Started via systemd user service.")
+            return
+        except RuntimeError:
+            pass
+
+        yagents_bin = shutil.which("yagents")
+        if yagents_bin:
+            cmd = [yagents_bin, "up"]
+        else:
+            cmd = [sys.executable, "-m", "yuuagents.cli.main", "up"]
+
+        if config_path:
+            cmd.extend(["--config", config_path])
+
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        click.echo("Daemon started in background.")
+        return
+
     from yuuagents.daemon.server import serve
 
     cfg = load_config(config_path)
@@ -489,8 +564,15 @@ def start(ctx: click.Context, config_path: str | None) -> None:
 
 @cli.command()
 @click.pass_context
-def stop(ctx: click.Context) -> None:
-    """Stop the running daemon."""
+def down(ctx: click.Context) -> None:
+    """Stop the daemon."""
+    try:
+        from yuuagents.cli.service import stop as stop_service
+
+        stop_service(ignore_errors=True)
+    except RuntimeError:
+        pass
+
     c = _client(ctx)
     try:
         c.health()
@@ -503,17 +585,19 @@ def stop(ctx: click.Context) -> None:
 
 
 @cli.command()
-def down() -> None:
-    """Stop the daemon and unregister the systemd service."""
-    from yuuagents.cli.service import uninstall
-
-    click.echo("Stopping yagents service ...")
+@click.argument("task_id")
+@click.pass_context
+def stop(ctx: click.Context, task_id: str) -> None:
+    """Cancel a running task."""
+    c = _client(ctx)
     try:
-        uninstall()
-        click.echo("Service stopped and unregistered.")
-    except RuntimeError as e:
-        click.echo(f"WARNING: {e}", err=True)
-        click.echo("You may need to stop the daemon manually.", err=True)
+        c.cancel(task_id)
+        click.echo(f"Task {task_id} cancelled.")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        c.close()
 
 
 # ── Agent management ──
@@ -641,22 +725,6 @@ def logs(ctx: click.Context, task_id: str) -> None:
                     click.echo(item)
                 else:
                     click.echo(json.dumps(item, indent=2, ensure_ascii=False))
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-    finally:
-        c.close()
-
-
-@cli.command("stop-agent")
-@click.argument("task_id")
-@click.pass_context
-def stop_agent(ctx: click.Context, task_id: str) -> None:
-    """Cancel a running task."""
-    c = _client(ctx)
-    try:
-        c.cancel(task_id)
-        click.echo(f"Task {task_id} cancelled.")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

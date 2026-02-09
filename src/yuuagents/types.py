@@ -42,9 +42,9 @@ class TaskRequest(msgspec.Struct, frozen=True, kw_only=True):
 
     agent: str = "main"
     persona: str = ""
-    task: str = ""
-    tools: list[str] = []
-    skills: list[str] = []
+    task: str
+    tools: list[str] = msgspec.field(default_factory=list)
+    skills: list[str] = msgspec.field(default_factory=list)
     model: str = ""
     container: str = ""
     image: str = ""
