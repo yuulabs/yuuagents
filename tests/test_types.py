@@ -210,12 +210,14 @@ class TestAgentInfo:
     def test_agent_info_minimal(self) -> None:
         """Should create AgentInfo with required fields."""
         info = AgentInfo(
+            task_id="t1",
             agent_id="abc123",
             persona="coder",
             task="write code",
             status="running",
             created_at="2025-01-01T00:00:00Z",
         )
+        assert info.task_id == "t1"
         assert info.agent_id == "abc123"
         assert info.persona == "coder"
         assert info.task == "write code"
@@ -234,6 +236,7 @@ class TestAgentInfo:
             timestamp=datetime.now(timezone.utc),
         )
         info = AgentInfo(
+            task_id="t1",
             agent_id="abc123",
             persona="coder",
             task="write code",
@@ -252,6 +255,7 @@ class TestAgentInfo:
     def test_agent_info_is_frozen(self) -> None:
         """AgentInfo should be immutable."""
         info = AgentInfo(
+            task_id="t1",
             agent_id="abc123",
             persona="coder",
             task="test",
@@ -274,6 +278,7 @@ class TestAgentInfo:
     def test_agent_info_serialization(self) -> None:
         """Should serialize to JSON via msgspec."""
         info = AgentInfo(
+            task_id="t1",
             agent_id="test-id",
             persona="researcher",
             task="search",
@@ -295,6 +300,7 @@ class TestAgentInfo:
             timestamp=datetime.now(timezone.utc),
         )
         info = AgentInfo(
+            task_id="t1",
             agent_id="test-id",
             persona="coder",
             task="test",
@@ -372,6 +378,7 @@ class TestTypeIntegration:
         """AgentStatus values should be usable in AgentInfo.status."""
         for status in AgentStatus:
             info = AgentInfo(
+                task_id="t1",
                 agent_id="test",
                 persona="test",
                 task="test",
@@ -388,6 +395,7 @@ class TestTypeIntegration:
             timestamp=datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
         )
         info = AgentInfo(
+            task_id="t1",
             agent_id="agent-1",
             persona="coder",
             task="complex task",
@@ -410,6 +418,7 @@ class TestTypeIntegration:
         """Should serialize list of AgentInfo."""
         agents = [
             AgentInfo(
+                task_id="t1",
                 agent_id="agent-1",
                 persona="coder",
                 task="task1",
@@ -417,6 +426,7 @@ class TestTypeIntegration:
                 created_at="2025-01-01T00:00:00Z",
             ),
             AgentInfo(
+                task_id="t2",
                 agent_id="agent-2",
                 persona="researcher",
                 task="task2",

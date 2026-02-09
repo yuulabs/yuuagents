@@ -72,8 +72,9 @@ class TestCreateAgentEndpoint:
 
         assert response.status_code == 201
         data = response.json()
-        assert "agent_id" in data
-        assert len(data["agent_id"]) > 0
+        assert data["agent_id"] == "main"
+        assert "task_id" in data
+        assert len(data["task_id"]) > 0
 
     def test_create_agent_minimal(self, client: TestClient) -> None:
         """Should work with minimal required fields."""
@@ -84,7 +85,8 @@ class TestCreateAgentEndpoint:
 
         assert response.status_code == 201
         data = response.json()
-        assert "agent_id" in data
+        assert data["agent_id"] == "main"
+        assert "task_id" in data
 
     def test_create_agent_invalid_json(self, client: TestClient) -> None:
         """Should return error for invalid JSON."""
@@ -128,6 +130,7 @@ class TestListAgentsEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert len(data) == 2
+        assert all("task_id" in agent for agent in data)
         assert all("agent_id" in agent for agent in data)
         assert all("status" in agent for agent in data)
 
@@ -144,20 +147,21 @@ class TestGetAgentEndpoint:
                 "task": "test task",
             },
         )
-        agent_id = create_response.json()["agent_id"]
+        task_id = create_response.json()["task_id"]
 
-        response = client.get(f"/api/agents/{agent_id}")
+        response = client.get(f"/api/agents/{task_id}")
 
         assert response.status_code == 200
         data = response.json()
-        assert data["agent_id"] == agent_id
+        assert data["task_id"] == task_id
+        assert data["agent_id"] == "main"
         assert data["task"] == "test task"
         assert "status" in data
         assert "created_at" in data
 
     def test_get_agent_not_found(self, client: TestClient) -> None:
         """Should return 404 for unknown agent."""
-        response = client.get("/api/agents/nonexistent-agent-id-12345")
+        response = client.get("/api/agents/nonexistent-task-id-12345")
 
         assert response.status_code == 404
         assert "error" in response.json()
@@ -175,9 +179,9 @@ class TestGetHistoryEndpoint:
                 "task": "test",
             },
         )
-        agent_id = create_response.json()["agent_id"]
+        task_id = create_response.json()["task_id"]
 
-        response = client.get(f"/api/agents/{agent_id}/history")
+        response = client.get(f"/api/agents/{task_id}/history")
 
         assert response.status_code == 200
         data = response.json()
@@ -189,7 +193,7 @@ class TestGetHistoryEndpoint:
 
     def test_get_history_not_found(self, client: TestClient) -> None:
         """Should return 404 for unknown agent."""
-        response = client.get("/api/agents/nonexistent-agent-id/history")
+        response = client.get("/api/agents/nonexistent-task-id/history")
 
         assert response.status_code == 404
 
@@ -206,10 +210,10 @@ class TestPostInputEndpoint:
                 "task": "test",
             },
         )
-        agent_id = create_response.json()["agent_id"]
+        task_id = create_response.json()["task_id"]
 
         response = client.post(
-            f"/api/agents/{agent_id}/input", json={"content": "user response"}
+            f"/api/agents/{task_id}/input", json={"content": "user response"}
         )
 
         assert response.status_code == 200
@@ -218,7 +222,7 @@ class TestPostInputEndpoint:
     def test_post_input_not_found(self, client: TestClient) -> None:
         """Should return 404 for unknown agent."""
         response = client.post(
-            "/api/agents/nonexistent-agent-id/input", json={"content": "test"}
+            "/api/agents/nonexistent-task-id/input", json={"content": "test"}
         )
 
         assert response.status_code == 404
@@ -236,20 +240,20 @@ class TestDeleteAgentEndpoint:
                 "task": "test",
             },
         )
-        agent_id = create_response.json()["agent_id"]
+        task_id = create_response.json()["task_id"]
 
-        response = client.delete(f"/api/agents/{agent_id}")
+        response = client.delete(f"/api/agents/{task_id}")
 
         assert response.status_code == 200
         assert response.json()["ok"] is True
 
         # Verify agent is marked as cancelled
-        status_response = client.get(f"/api/agents/{agent_id}")
+        status_response = client.get(f"/api/agents/{task_id}")
         assert status_response.json()["status"] == "cancelled"
 
     def test_delete_agent_not_found(self, client: TestClient) -> None:
         """Should return 404 for unknown agent."""
-        response = client.delete("/api/agents/nonexistent-agent-id")
+        response = client.delete("/api/agents/nonexistent-task-id")
 
         assert response.status_code == 404
 

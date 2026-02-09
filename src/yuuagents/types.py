@@ -53,11 +53,13 @@ class TaskRequest(msgspec.Struct, frozen=True, kw_only=True):
 class AgentInfo(msgspec.Struct, frozen=True, kw_only=True):
     """Summary returned by GET /api/agents and GET /api/agents/{id}."""
 
+    task_id: str
     agent_id: str
     persona: str
     task: str
     status: str
     created_at: str
+    last_assistant_message: str = ""
     steps: int = 0
     total_tokens: int = 0
     total_cost_usd: float = 0.0

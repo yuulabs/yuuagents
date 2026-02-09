@@ -57,15 +57,16 @@ class PricingEntry(msgspec.Struct, kw_only=True):
 class ProviderConfig(msgspec.Struct, kw_only=True):
     """LLM provider configuration.
 
-    ``kind`` selects the wire protocol:
-    - ``"openai"``    → OpenAIChatCompletionProvider
-    - ``"anthropic"`` → AnthropicMessagesProvider
+    ``api_type`` selects the wire protocol. One of:
+    - ``"openai-chat-completion"``
+    - ``"openai-responses"``
+    - ``"anthropic-messages"``
 
     Provider-specific fields (``base_url``, ``organization``) are passed
     through to the underlying SDK.
     """
 
-    kind: str = "openai"
+    api_type: str = "openai-chat-completion"
     api_key_env: str = "OPENAI_API_KEY"
     default_model: str = "gpt-4o"
     # Provider-specific

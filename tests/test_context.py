@@ -15,10 +15,12 @@ class TestAgentContext:
     def test_context_creation(self) -> None:
         """Should create context with all required fields."""
         ctx = AgentContext(
+            task_id="task-123",
             agent_id="agent-123",
             workdir="/root",
             docker_container="container-abc",
         )
+        assert ctx.task_id == "task-123"
         assert ctx.agent_id == "agent-123"
         assert ctx.workdir == "/root"
         assert ctx.docker_container == "container-abc"
@@ -26,6 +28,7 @@ class TestAgentContext:
     def test_context_defaults(self) -> None:
         """Should have default values for optional fields."""
         ctx = AgentContext(
+            task_id="task-123",
             agent_id="agent-123",
             workdir="/root",
             docker_container="container-abc",
@@ -40,6 +43,7 @@ class TestAgentContext:
         queue: asyncio.Queue[str] = asyncio.Queue()
 
         ctx = AgentContext(
+            task_id="task-123",
             agent_id="agent-123",
             workdir="/home/user",
             docker_container="custom-container",
@@ -55,6 +59,7 @@ class TestAgentContext:
     def test_context_is_mutable(self) -> None:
         """AgentContext should be mutable."""
         ctx = AgentContext(
+            task_id="task-123",
             agent_id="agent-123",
             workdir="/root",
             docker_container="container-abc",
@@ -67,6 +72,7 @@ class TestAgentContext:
     def test_context_input_queue_operations(self) -> None:
         """Should be able to use input_queue."""
         ctx = AgentContext(
+            task_id="task-123",
             agent_id="agent-123",
             workdir="/root",
             docker_container="container-abc",
@@ -84,6 +90,7 @@ class TestAgentContext:
     async def test_context_input_queue_async(self) -> None:
         """Should work with async queue operations."""
         ctx = AgentContext(
+            task_id="task-123",
             agent_id="agent-123",
             workdir="/root",
             docker_container="container-abc",
@@ -102,6 +109,7 @@ class TestAgentContext:
 
         fake = FakeDocker()
         ctx = AgentContext(
+            task_id="task-123",
             agent_id="agent-123",
             workdir="/root",
             docker_container="container-abc",
@@ -123,10 +131,12 @@ class TestAgentContext:
     def test_context_empty_strings(self) -> None:
         """Should accept empty strings."""
         ctx = AgentContext(
+            task_id="",
             agent_id="",
             workdir="",
             docker_container="",
         )
+        assert ctx.task_id == ""
         assert ctx.agent_id == ""
         assert ctx.workdir == ""
         assert ctx.docker_container == ""
@@ -134,6 +144,7 @@ class TestAgentContext:
     def test_context_special_characters(self) -> None:
         """Should handle special characters in strings."""
         ctx = AgentContext(
+            task_id="task-with-special_chars.123",
             agent_id="agent-with-special_chars.123",
             workdir="/path with spaces/and-dashes",
             docker_container="container_name:test",
@@ -145,11 +156,13 @@ class TestAgentContext:
     def test_context_queue_is_unique_per_instance(self) -> None:
         """Each context should have its own queue."""
         ctx1 = AgentContext(
+            task_id="task-1",
             agent_id="agent-1",
             workdir="/root",
             docker_container="c1",
         )
         ctx2 = AgentContext(
+            task_id="task-2",
             agent_id="agent-2",
             workdir="/root",
             docker_container="c2",

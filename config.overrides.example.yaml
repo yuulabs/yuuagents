@@ -15,7 +15,7 @@
 # Example: use Anthropic instead of (or in addition to) OpenAI
 # providers:
 #   anthropic-main:
-#     kind: anthropic
+#     api_type: anthropic-messages
 #     api_key_env: ANTHROPIC_API_KEY
 #     default_model: claude-sonnet-4-20250514
 #     pricing:

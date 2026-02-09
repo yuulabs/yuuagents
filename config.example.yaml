@@ -54,7 +54,11 @@ tavily:
 
 providers:
   openai-default:
-    kind: openai                     # openai | anthropic
+    # Wire protocol identifier:
+    #   - openai-chat-completion
+    #   - openai-responses
+    #   - anthropic-messages
+    api_type: openai-chat-completion
     api_key_env: OPENAI_API_KEY
     default_model: gpt-4o
     # Optional: custom API base URL (e.g. OpenRouter, local vLLM, etc.)

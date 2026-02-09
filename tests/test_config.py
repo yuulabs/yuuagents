@@ -105,7 +105,7 @@ class TestProviderConfig:
 
     def test_default_values(self) -> None:
         cfg = ProviderConfig()
-        assert cfg.kind == "openai"
+        assert cfg.api_type == "openai-chat-completion"
         assert cfg.api_key_env == "OPENAI_API_KEY"
         assert cfg.default_model == "gpt-4o"
         assert cfg.base_url == ""
@@ -114,11 +114,11 @@ class TestProviderConfig:
 
     def test_anthropic_provider(self) -> None:
         cfg = ProviderConfig(
-            kind="anthropic",
+            api_type="anthropic-messages",
             api_key_env="ANTHROPIC_API_KEY",
             default_model="claude-sonnet-4-20250514",
         )
-        assert cfg.kind == "anthropic"
+        assert cfg.api_type == "anthropic-messages"
         assert cfg.api_key_env == "ANTHROPIC_API_KEY"
         assert cfg.default_model == "claude-sonnet-4-20250514"
 
@@ -133,7 +133,7 @@ class TestProviderConfig:
 
     def test_with_base_url(self) -> None:
         cfg = ProviderConfig(
-            kind="openai",
+            api_type="openai-chat-completion",
             base_url="https://openrouter.ai/api/v1",
         )
         assert cfg.base_url == "https://openrouter.ai/api/v1"
@@ -194,7 +194,7 @@ class TestConfig:
         cfg = Config(
             providers={
                 "openai-default": ProviderConfig(
-                    kind="openai",
+                    api_type="openai-chat-completion",
                     default_model="gpt-4o",
                 ),
             },
@@ -310,7 +310,7 @@ tavily:
 
 providers:
   openai-main:
-    kind: openai
+    api_type: openai-chat-completion
     api_key_env: OPENAI_API_KEY
     default_model: gpt-4o
     base_url: https://custom.api.com
@@ -321,7 +321,7 @@ providers:
         output_mtok: 10.00
 
   anthropic-main:
-    kind: anthropic
+    api_type: anthropic-messages
     api_key_env: ANTHROPIC_API_KEY
     default_model: claude-sonnet-4-20250514
 
@@ -362,7 +362,7 @@ agents:
         # Check providers
         assert "openai-main" in cfg.providers
         p = cfg.providers["openai-main"]
-        assert p.kind == "openai"
+        assert p.api_type == "openai-chat-completion"
         assert p.default_model == "gpt-4o"
         assert p.base_url == "https://custom.api.com"
         assert p.organization == "my-org"
@@ -371,7 +371,7 @@ agents:
         assert p.pricing[0].input_mtok == 2.50
 
         assert "anthropic-main" in cfg.providers
-        assert cfg.providers["anthropic-main"].kind == "anthropic"
+        assert cfg.providers["anthropic-main"].api_type == "anthropic-messages"
 
         # Check agents
         assert "main" in cfg.agents
@@ -440,7 +440,7 @@ docker:
   image: ubuntu:24.04
 providers:
   openai-default:
-    kind: openai
+    api_type: openai-chat-completion
     default_model: gpt-4o
 """)
         overrides = tmp_path / "overrides.yaml"
@@ -480,7 +480,7 @@ class TestConfigSerialization:
         config_file.write_text("""\
 providers:
   test-provider:
-    kind: openai
+    api_type: openai-chat-completion
     default_model: gpt-3.5-turbo
 agents:
   main:

@@ -20,8 +20,8 @@ async def run(agent: Agent, task: str, ctx: AgentContext) -> None:
 
     ytrace.init(service_name="yuuagents")
     with ytrace.conversation(
-        id=UUID(agent.agent_id),
-        agent=agent.persona[:80],
+        id=UUID(agent.task_id),
+        agent=agent.agent_id,
         model=agent.llm.default_model,
     ) as chat:
         chat.system(persona=agent.full_system_prompt, tools=agent.tools.specs())

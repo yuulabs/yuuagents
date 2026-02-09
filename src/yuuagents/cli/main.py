@@ -134,6 +134,7 @@ def setup(
                 err=True,
             )
             sys.exit(1)
+        assert root is not None
 
         base_path = root / _PROJECT_CONFIG_NAME
         click.echo(f"Project root:  {root}")
@@ -352,7 +353,7 @@ def config(
                 },
                 "providers": {
                     name: {
-                        "kind": p.kind,
+                        "api_type": p.api_type,
                         "api_key_env": p.api_key_env,
                         "default_model": p.default_model,
                         "base_url": p.base_url,
@@ -558,7 +559,7 @@ def run(
         payload["skills"] = [s.strip() for s in skill_names.split(",")]
     try:
         result = c.submit(payload)
-        click.echo(f"Agent started: {result['agent_id']}")
+        click.echo(f"Task started: {result['task_id']}  agent={result['agent_id']}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -578,23 +579,26 @@ def list_agents(ctx: click.Context) -> None:
             return
         for a in agents:
             status = a.get("status", "?")
+            tid = a.get("task_id", "?")
             aid = a.get("agent_id", "?")
             task = a.get("task", "")[:60]
             steps = a.get("steps", 0)
             cost = a.get("total_cost_usd", 0)
-            click.echo(f"  [{status:>8}] {aid}  steps={steps}  ${cost:.4f}  {task}")
+            click.echo(
+                f"  [{status:>8}] {tid}  agent={aid}  steps={steps}  ${cost:.4f}  {task}"
+            )
     finally:
         c.close()
 
 
 @cli.command()
-@click.argument("agent_id")
+@click.argument("task_id")
 @click.pass_context
-def status(ctx: click.Context, agent_id: str) -> None:
-    """Show agent status."""
+def status(ctx: click.Context, task_id: str) -> None:
+    """Show task status."""
     c = _client(ctx)
     try:
-        info = c.status(agent_id)
+        info = c.status(task_id)
         click.echo(json.dumps(info, indent=2, ensure_ascii=False))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
@@ -604,13 +608,13 @@ def status(ctx: click.Context, agent_id: str) -> None:
 
 
 @cli.command()
-@click.argument("agent_id")
+@click.argument("task_id")
 @click.pass_context
-def logs(ctx: click.Context, agent_id: str) -> None:
-    """Show agent conversation history."""
+def logs(ctx: click.Context, task_id: str) -> None:
+    """Show task conversation history."""
     c = _client(ctx)
     try:
-        hist = c.history(agent_id)
+        hist = c.history(task_id)
         for msg in hist:
             role = msg.get("role", "?")
             items = msg.get("items", [])
@@ -628,14 +632,14 @@ def logs(ctx: click.Context, agent_id: str) -> None:
 
 
 @cli.command("stop-agent")
-@click.argument("agent_id")
+@click.argument("task_id")
 @click.pass_context
-def stop_agent(ctx: click.Context, agent_id: str) -> None:
-    """Cancel a running agent."""
+def stop_agent(ctx: click.Context, task_id: str) -> None:
+    """Cancel a running task."""
     c = _client(ctx)
     try:
-        c.cancel(agent_id)
-        click.echo(f"Agent {agent_id} cancelled.")
+        c.cancel(task_id)
+        click.echo(f"Task {task_id} cancelled.")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -644,14 +648,14 @@ def stop_agent(ctx: click.Context, agent_id: str) -> None:
 
 
 @cli.command()
-@click.argument("agent_id")
+@click.argument("task_id")
 @click.argument("message")
 @click.pass_context
-def input(ctx: click.Context, agent_id: str, message: str) -> None:
-    """Reply to an agent's user_input request."""
+def input(ctx: click.Context, task_id: str, message: str) -> None:
+    """Reply to a task's user_input request."""
     c = _client(ctx)
     try:
-        c.respond(agent_id, message)
+        c.respond(task_id, message)
         click.echo("Input sent.")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)

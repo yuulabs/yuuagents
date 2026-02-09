@@ -37,26 +37,26 @@ class YAgentsClient:
     def list_agents(self) -> list[dict[str, Any]]:
         return self._client.get("/api/agents").json()
 
-    def status(self, agent_id: str) -> dict[str, Any]:
-        resp = self._client.get(f"/api/agents/{agent_id}")
+    def status(self, task_id: str) -> dict[str, Any]:
+        resp = self._client.get(f"/api/agents/{task_id}")
         resp.raise_for_status()
         return resp.json()
 
-    def history(self, agent_id: str) -> list[dict[str, Any]]:
-        resp = self._client.get(f"/api/agents/{agent_id}/history")
+    def history(self, task_id: str) -> list[dict[str, Any]]:
+        resp = self._client.get(f"/api/agents/{task_id}/history")
         resp.raise_for_status()
         return resp.json()
 
-    def respond(self, agent_id: str, content: str) -> dict[str, Any]:
+    def respond(self, task_id: str, content: str) -> dict[str, Any]:
         resp = self._client.post(
-            f"/api/agents/{agent_id}/input",
+            f"/api/agents/{task_id}/input",
             json={"content": content},
         )
         resp.raise_for_status()
         return resp.json()
 
-    def cancel(self, agent_id: str) -> dict[str, Any]:
-        resp = self._client.delete(f"/api/agents/{agent_id}")
+    def cancel(self, task_id: str) -> dict[str, Any]:
+        resp = self._client.delete(f"/api/agents/{task_id}")
         resp.raise_for_status()
         return resp.json()
 

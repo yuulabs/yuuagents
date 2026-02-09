@@ -132,7 +132,7 @@ uv run yagents logs <agent_id>
 ```yaml
 providers:
   my-provider:
-    kind: openai
+    api_type: openai-chat-completion
     api_key_env: MY_API_KEY
     default_model: gpt-4
     base_url: https://api.example.com/v1

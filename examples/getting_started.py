@@ -19,7 +19,6 @@ try:
     from rich.panel import Panel
     from rich.prompt import Confirm, Prompt
     from rich.progress import Progress, SpinnerColumn, TextColumn
-    from rich.live import Live
     from rich.table import Table
     from rich import box
 except ImportError:
@@ -78,39 +77,76 @@ def configure_provider():
     console.print("[bold]步骤 1: 配置 LLM Provider[/bold]\n")
 
     providers = {
-        "1": ("OpenAI", "OPENAI_API_KEY", "https://api.openai.com/v1"),
-        "2": ("Anthropic", "ANTHROPIC_API_KEY", "https://api.anthropic.com"),
-        "3": ("OpenRouter", "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
-        "4": ("自定义", None, None),
+        "1": (
+            "OpenAI",
+            "openai-chat-completion",
+            "OPENAI_API_KEY",
+            "https://api.openai.com/v1",
+            "gpt-4o",
+        ),
+        "2": (
+            "Anthropic",
+            "anthropic-messages",
+            "ANTHROPIC_API_KEY",
+            "https://api.anthropic.com",
+            "claude-3-5-sonnet-20241022",
+        ),
+        "3": (
+            "OpenRouter (OpenAI-compatible)",
+            "openai-chat-completion",
+            "OPENROUTER_API_KEY",
+            "https://openrouter.ai/api/v1",
+            "gpt-4o",
+        ),
+        "4": ("自定义", "", "", "", ""),
     }
 
     console.print("选择 LLM Provider:")
-    for key, (name, _, _) in providers.items():
+    for key, (name, _, _, _, _) in providers.items():
         console.print(f"  {key}. {name}")
 
     choice = Prompt.ask("\n请输入选项", choices=list(providers.keys()), default="1")
-    provider_name, api_key_env, default_base_url = providers[choice]
+    provider_label, api_type, api_key_env, default_base_url, default_model = providers[
+        choice
+    ]
+
+    provider_key = Prompt.ask(
+        "\n请输入供应商名字（配置中的 providers.<name>）", default="main"
+    )
+    provider_key = provider_key.strip() or "main"
+
+    if choice == "4":
+        api_type = Prompt.ask(
+            "请输入 API 类型",
+            choices=[
+                "openai-chat-completion",
+                "openai-responses",
+                "anthropic-messages",
+            ],
+            default="openai-chat-completion",
+        )
+        api_key_env = Prompt.ask("请输入 API Key 环境变量名", default="CUSTOM_API_KEY")
+        api_key_env = api_key_env.strip() or "CUSTOM_API_KEY"
+        default_base_url = Prompt.ask("请输入 API Base URL", default="")
+        default_model = Prompt.ask(
+            "请输入默认模型名称",
+            default="claude-3-5-sonnet-20241022"
+            if api_type == "anthropic-messages"
+            else "gpt-4o",
+        )
 
     # 获取 API Key
-    api_key = Prompt.ask(f"\n请输入 {provider_name} API Key", password=True)
+    api_key = Prompt.ask(f"\n请输入 {provider_label} API Key", password=True)
 
     # 设置环境变量
-    if api_key_env:
-        os.environ[api_key_env] = api_key
+    os.environ[api_key_env] = api_key
 
     # 询问 Base URL
-    if choice == "4":
-        base_url = Prompt.ask("请输入 API Base URL", default="")
-        model = Prompt.ask("请输入默认模型名称", default="gpt-4o")
-    else:
-        base_url = Prompt.ask(
-            f"API Base URL (留空使用默认)",
-            default=default_base_url if default_base_url else "",
-        )
-        if choice == "2":
-            model = Prompt.ask("请输入模型名称", default="claude-3-5-sonnet-20241022")
-        else:
-            model = Prompt.ask("请输入模型名称", default="gpt-4o")
+    base_url = Prompt.ask(
+        "API Base URL (留空使用默认)",
+        default=default_base_url if default_base_url else "",
+    )
+    model = Prompt.ask("请输入模型名称", default=default_model)
 
     # 询问 Tavily API Key (用于 web_search)
     console.print("\n[yellow]可选配置[/yellow]")
@@ -123,8 +159,9 @@ def configure_provider():
     console.print()
 
     return {
-        "provider_name": provider_name.lower().replace(" ", "-"),
-        "api_key_env": api_key_env or "CUSTOM_API_KEY",
+        "provider_key": provider_key,
+        "api_type": api_type,
+        "api_key_env": api_key_env,
         "api_key": api_key,
         "base_url": base_url,
         "model": model,
@@ -137,16 +174,13 @@ def setup_yagents(config: dict):
     console.print("[bold]步骤 2: 运行 yagents setup[/bold]\n")
 
     # 设置 API key 环境变量供 setup 使用
-    if config["api_key_env"]:
-        os.environ[config["api_key_env"]] = config["api_key"]
+    os.environ[config["api_key_env"]] = config["api_key"]
 
     # 创建 overrides 文件
     overrides = {
         "providers": {
-            config["provider_name"]: {
-                "kind": "openai"
-                if "anthropic" not in config["provider_name"].lower()
-                else "anthropic",
+            config["provider_key"]: {
+                "api_type": config["api_type"],
                 "api_key_env": config["api_key_env"],
                 "default_model": config["model"],
                 "base_url": config["base_url"] if config["base_url"] else "",
@@ -154,7 +188,7 @@ def setup_yagents(config: dict):
         },
         "agents": {
             "main": {
-                "provider": config["provider_name"],
+                "provider": config["provider_key"],
                 "model": config["model"],
                 "persona": "You are a senior software engineer. You write clean, well-tested code. You prefer simple solutions and avoid over-engineering.",
                 "tools": [
@@ -196,7 +230,7 @@ def setup_yagents(config: dict):
             if result.returncode == 0:
                 console.print("  [green]✓[/green] setup 完成")
             else:
-                console.print(f"  [red]✗ setup 失败[/red]")
+                console.print("  [red]✗ setup 失败[/red]")
                 console.print(result.stderr)
                 sys.exit(1)
         except subprocess.TimeoutExpired:
@@ -215,7 +249,7 @@ def start_daemon():
 
     # 检查 daemon 是否已在运行
     try:
-        result = subprocess.run(
+        subprocess.run(
             ["yagents", "stop"],
             capture_output=True,
             timeout=5,
@@ -239,7 +273,7 @@ def start_daemon():
 
     # 检查是否成功启动
     try:
-        result = subprocess.run(
+        subprocess.run(
             ["yagents", "stop"],
             capture_output=True,
             timeout=5,
@@ -303,7 +337,7 @@ def run_first_task(config: dict):
 
             # 显示监控提示
             console.print("你可以使用以下命令监控任务执行:")
-            console.print(f"  [dim]yagents list              # 列出所有 agents[/dim]")
+            console.print("  [dim]yagents list              # 列出所有 agents[/dim]")
             console.print(f"  [dim]yagents status {agent_id}   # 查看详细状态[/dim]")
             console.print(f"  [dim]yagents logs {agent_id}     # 查看对话历史[/dim]")
 
@@ -335,7 +369,7 @@ def run_first_task(config: dict):
                 except json.JSONDecodeError:
                     console.print(status_result.stdout)
         else:
-            console.print(f"  [red]✗[/red] 任务提交失败")
+            console.print("  [red]✗[/red] 任务提交失败")
             console.print(result.stderr)
     except subprocess.TimeoutExpired:
         console.print("  [yellow]![/yellow] 任务提交超时")

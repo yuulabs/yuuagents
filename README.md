@@ -251,12 +251,19 @@ docker:
 
 providers:
   openai:
-    kind: openai
+    api_type: openai-chat-completion
     api_key_env: OPENAI_API_KEY
     default_model: gpt-4o
+    # 可选：覆盖/补充该 provider 的模型价格（USD / 1,000,000 tokens）
+    # pricing:
+    #   - model: gpt-4o
+    #     input_mtok: 5.0
+    #     output_mtok: 15.0
+    #     cache_read_mtok: 0.0
+    #     cache_write_mtok: 0.0
   
   anthropic:
-    kind: anthropic
+    api_type: anthropic-messages
     api_key_env: ANTHROPIC_API_KEY
     default_model: claude-3-5-sonnet-20241022
 
@@ -279,6 +286,32 @@ agents:
     tools:
       - web_search
       - read_file
+```
+
+### 成本统计与 pricing
+
+`yagents status` 里的 `total_cost_usd` 来自 yuullm 的价格计算器：
+
+- 默认情况下会使用 yuullm 内置价格表（如果该 model 有收录，就会自动产生成本）。
+- 计价使用的 provider 名称来自 `providers.<name>` 里的 `<name>`（不是 `api_type`）。
+- 你可以在 `providers.<name>.pricing` 里为特定 model 配置/覆盖价格。
+- 单位是 USD / 1,000,000 tokens（也就是 `*_mtok` 的含义）。
+- 修改配置后需要重启 daemon 才会生效。
+
+完整示例（覆盖单个模型的输入/输出 token 价格）：
+
+```yaml
+providers:
+  openai:
+    api_type: openai-chat-completion
+    api_key_env: OPENAI_API_KEY
+    default_model: gpt-4o
+    pricing:
+      - model: gpt-4o
+        input_mtok: 5.0
+        output_mtok: 15.0
+        cache_read_mtok: 0.0
+        cache_write_mtok: 0.0
 ```
 
 ---

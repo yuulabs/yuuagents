@@ -46,27 +46,27 @@ def create_app(manager: AgentManager) -> Starlette:
             return _json({"error": str(exc)}, status=400)
 
         try:
-            agent_id = await manager.submit(req)
+            task_id = await manager.submit(req)
         except ValueError as exc:
             return _json({"error": str(exc)}, status=400)
 
-        return _json({"agent_id": agent_id}, status=201)
+        return _json({"task_id": task_id, "agent_id": req.agent}, status=201)
 
     async def list_agents(request: Request) -> Response:
         return _json(manager.list_agents())
 
     async def get_agent(request: Request) -> Response:
-        agent_id = request.path_params["agent_id"]
+        task_id = request.path_params["task_id"]
         try:
-            info = manager.status(agent_id)
+            info = manager.status(task_id)
         except KeyError:
             return _json({"error": "not found"}, status=404)
         return _json(info)
 
     async def get_history(request: Request) -> Response:
-        agent_id = request.path_params["agent_id"]
+        task_id = request.path_params["task_id"]
         try:
-            hist = manager.history(agent_id)
+            hist = manager.history(task_id)
         except KeyError:
             return _json({"error": "not found"}, status=404)
         # History is list[Message] = list[tuple[str, list[Item]]]
@@ -74,19 +74,19 @@ def create_app(manager: AgentManager) -> Starlette:
         return JSONResponse(serializable)
 
     async def post_input(request: Request) -> Response:
-        agent_id = request.path_params["agent_id"]
+        task_id = request.path_params["task_id"]
         body = await request.json()
         content = body.get("content", "")
         try:
-            await manager.respond(agent_id, content)
+            await manager.respond(task_id, content)
         except KeyError:
             return _json({"error": "not found"}, status=404)
         return _json({"ok": True})
 
     async def delete_agent(request: Request) -> Response:
-        agent_id = request.path_params["agent_id"]
+        task_id = request.path_params["task_id"]
         try:
-            await manager.cancel(agent_id)
+            await manager.cancel(task_id)
         except KeyError:
             return _json({"error": "not found"}, status=404)
         return _json({"ok": True})
@@ -102,7 +102,7 @@ def create_app(manager: AgentManager) -> Starlette:
         # Return sanitised config (no secrets)
         cfg = manager.config
         providers_summary = {
-            name: {"kind": p.kind, "default_model": p.default_model}
+            name: {"api_type": p.api_type, "default_model": p.default_model}
             for name, p in cfg.providers.items()
         }
         agents_summary = {
@@ -134,10 +134,10 @@ def create_app(manager: AgentManager) -> Starlette:
         Route("/health", health, methods=["GET"]),
         Route("/api/agents", create_agent, methods=["POST"]),
         Route("/api/agents", list_agents, methods=["GET"]),
-        Route("/api/agents/{agent_id}", get_agent, methods=["GET"]),
-        Route("/api/agents/{agent_id}/history", get_history, methods=["GET"]),
-        Route("/api/agents/{agent_id}/input", post_input, methods=["POST"]),
-        Route("/api/agents/{agent_id}", delete_agent, methods=["DELETE"]),
+        Route("/api/agents/{task_id}", get_agent, methods=["GET"]),
+        Route("/api/agents/{task_id}/history", get_history, methods=["GET"]),
+        Route("/api/agents/{task_id}/input", post_input, methods=["POST"]),
+        Route("/api/agents/{task_id}", delete_agent, methods=["DELETE"]),
         Route("/api/skills", list_skills, methods=["GET"]),
         Route("/api/skills/scan", scan_skills, methods=["POST"]),
         Route("/api/config", get_config, methods=["GET"]),

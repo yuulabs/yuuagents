@@ -50,16 +50,17 @@ class AgentManager:
     # -- agent lifecycle --
 
     async def submit(self, req: TaskRequest) -> str:
-        agent_id = uuid4().hex
+        task_id = uuid4().hex
+        agent_id = req.agent
 
         # Resolve agent entry by name (e.g. "main", "researcher")
-        agent_entry = self.config.agents.get(req.agent)
+        agent_entry = self.config.agents.get(agent_id)
 
         llm_client = self._make_llm(
-            agent_name=req.agent,
+            agent_name=agent_id,
             model_override=req.model,
         )
-        tool_names = req.tools or self._default_tools(req.agent)
+        tool_names = req.tools or self._default_tools(agent_id)
         tool_objs = [BUILTIN_TOOLS[n] for n in tool_names if n in BUILTIN_TOOLS]
         manager = yt.ToolManager(tool_objs)
 
@@ -67,14 +68,14 @@ class AgentManager:
         persona_text = (
             req.persona
             or (agent_entry.persona if agent_entry and agent_entry.persona else "")
-            or req.agent
+            or agent_id
         )
         skills_xml = self._resolve_skills(
             req.skills if req.skills else (agent_entry.skills if agent_entry else [])
         )
 
         container_id = await self.docker.resolve(
-            agent_id=agent_id,
+            task_id=task_id,
             container=req.container,
             image=req.image,
         )
@@ -88,6 +89,7 @@ class AgentManager:
             prompt_builder.add_section(skills_xml)
 
         config = AgentConfig(
+            task_id=task_id,
             agent_id=agent_id,
             persona=persona_text,
             tools=manager,
@@ -97,6 +99,7 @@ class AgentManager:
         agent = Agent(config=config)
 
         ctx = AgentContext(
+            task_id=task_id,
             agent_id=agent_id,
             workdir=self.docker.workdir,
             docker_container=container_id,
@@ -104,11 +107,11 @@ class AgentManager:
             tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
         )
 
-        self._agents[agent_id] = agent
-        self._contexts[agent_id] = ctx
+        self._agents[task_id] = agent
+        self._contexts[task_id] = ctx
         task = asyncio.create_task(self._run(agent, req.task, ctx))
-        self._tasks[agent_id] = task
-        return agent_id
+        self._tasks[task_id] = task
+        return task_id
 
     async def _run(self, agent: Agent, task: str, ctx: AgentContext) -> None:
         try:
@@ -116,30 +119,30 @@ class AgentManager:
         except asyncio.CancelledError:
             agent.status = AgentStatus.CANCELLED
         except Exception as exc:
-            logger.exception("Agent {} failed", agent.agent_id)
+            logger.exception("Task {} ({}) failed", agent.task_id, agent.agent_id)
             agent.fail(exc)
 
     def list_agents(self) -> list[AgentInfo]:
         return [self._info(a) for a in self._agents.values()]
 
-    def status(self, agent_id: str) -> AgentInfo:
-        return self._info(self._agents[agent_id])
+    def status(self, task_id: str) -> AgentInfo:
+        return self._info(self._agents[task_id])
 
-    def history(self, agent_id: str) -> list[Any]:
-        return self._agents[agent_id].history
+    def history(self, task_id: str) -> list[Any]:
+        return self._agents[task_id].history
 
-    async def respond(self, agent_id: str, content: str) -> None:
-        ctx = self._contexts[agent_id]
+    async def respond(self, task_id: str, content: str) -> None:
+        ctx = self._contexts[task_id]
         await ctx.input_queue.put(content)
 
-    async def cancel(self, agent_id: str) -> None:
-        if agent_id not in self._agents:
-            raise KeyError(agent_id)
+    async def cancel(self, task_id: str) -> None:
+        if task_id not in self._agents:
+            raise KeyError(task_id)
 
-        task = self._tasks.get(agent_id)
+        task = self._tasks.get(task_id)
         if task and not task.done():
             task.cancel()
-        agent = self._agents.get(agent_id)
+        agent = self._agents.get(task_id)
         if agent:
             agent.status = AgentStatus.CANCELLED
 
@@ -164,13 +167,50 @@ class AgentManager:
 
     # -- private helpers --
 
+    def _last_assistant_message(self, agent: Agent) -> str:
+        for msg in reversed(agent.history):
+            role: str | None = None
+            items: list[Any] | None = None
+
+            if isinstance(msg, tuple) and len(msg) == 2:
+                role, items = msg
+            elif isinstance(msg, dict):
+                role = msg.get("role")
+                items = msg.get("items")
+
+            if role != "assistant" or not isinstance(items, list):
+                continue
+
+            text_parts: list[str] = []
+            tool_names: list[str] = []
+            for item in items:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                    continue
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "tool_call"
+                    and isinstance(item.get("name"), str)
+                ):
+                    tool_names.append(item["name"]) #type:ignore
+
+            text = "".join(text_parts).strip()
+            if text:
+                return text
+            if tool_names:
+                return "\n".join(f"tool_call: {n}" for n in tool_names)
+            return ""
+        return ""
+
     def _info(self, agent: Agent) -> AgentInfo:
         return AgentInfo(
+            task_id=agent.task_id,
             agent_id=agent.agent_id,
             persona=agent.persona[:80],
             task=agent.task,
             status=agent.status.value,
             created_at=agent.created_at.isoformat(),
+            last_assistant_message=self._last_assistant_message(agent),
             steps=agent.steps,
             total_tokens=agent.total_tokens,
             total_cost_usd=agent.total_cost_usd,
@@ -193,16 +233,20 @@ class AgentManager:
 
         # Resolve provider config
         provider_cfg: ProviderConfig | None = None
+        provider_name = (
+            agent_entry.provider if agent_entry and agent_entry.provider else ""
+        )
         if agent_entry and agent_entry.provider:
             provider_cfg = self.config.providers.get(agent_entry.provider)
 
         if provider_cfg is None and self.config.providers:
             # Fall back to first provider
-            provider_cfg = next(iter(self.config.providers.values()))
+            provider_name, provider_cfg = next(iter(self.config.providers.items()))
 
         if provider_cfg is None:
             # No providers configured at all — use bare defaults
             provider_cfg = ProviderConfig()
+            provider_name = "openai"
 
         # Determine model
         model = (
@@ -215,23 +259,44 @@ class AgentManager:
         api_key = os.environ.get(provider_cfg.api_key_env, "")
         provider: yuullm.Provider
 
-        if provider_cfg.kind == "anthropic":
-            kwargs: dict[str, Any] = {"api_key": api_key}
-            if provider_cfg.base_url:
-                kwargs["base_url"] = provider_cfg.base_url
-            provider = yuullm.providers.AnthropicMessagesProvider(**kwargs)
-        else:
-            kwargs = {"api_key": api_key}
-            if provider_cfg.base_url:
-                kwargs["base_url"] = provider_cfg.base_url
-            if provider_cfg.organization:
-                kwargs["organization"] = provider_cfg.organization
-            provider = yuullm.providers.OpenAIChatCompletionProvider(**kwargs)
+        match provider_cfg.api_type:
+            case "anthropic-messages":
+                kwargs: dict[str, Any] = {
+                    "api_key": api_key,
+                    "provider_name": provider_name,
+                }
+                if provider_cfg.base_url:
+                    kwargs["base_url"] = provider_cfg.base_url
+                provider = yuullm.providers.AnthropicMessagesProvider(**kwargs)
+            case "openai-chat-completion":
+                kwargs = {"api_key": api_key, "provider_name": provider_name}
+                if provider_cfg.base_url:
+                    kwargs["base_url"] = provider_cfg.base_url
+                if provider_cfg.organization:
+                    kwargs["organization"] = provider_cfg.organization
+                provider = yuullm.providers.OpenAIChatCompletionProvider(**kwargs)
+            case "openai-responses":
+                provider_cls = getattr(
+                    yuullm.providers, "OpenAIResponsesProvider", None
+                )
+                if provider_cls is None:
+                    raise RuntimeError(
+                        "api_type 'openai-responses' requires yuullm.providers.OpenAIResponsesProvider"
+                    )
+                kwargs = {"api_key": api_key, "provider_name": provider_name}
+                if provider_cfg.base_url:
+                    kwargs["base_url"] = provider_cfg.base_url
+                if provider_cfg.organization:
+                    kwargs["organization"] = provider_cfg.organization
+                provider = provider_cls(**kwargs)
+            case _:
+                raise ValueError(f"unknown api_type {provider_cfg.api_type!r}")
 
-        # Build PriceCalculator from inline pricing
-        price_calc: yuullm.PriceCalculator | None = None
-        if provider_cfg.pricing:
-            price_calc = self._build_price_calculator(provider_cfg)
+        price_calc = (
+            self._build_price_calculator(provider_name, provider_cfg)
+            if provider_cfg.pricing
+            else yuullm.PriceCalculator()
+        )
 
         return yuullm.YLLMClient(
             provider=provider,
@@ -241,6 +306,7 @@ class AgentManager:
 
     @staticmethod
     def _build_price_calculator(
+        provider_name: str,
         provider_cfg: ProviderConfig,
     ) -> yuullm.PriceCalculator:
         """Convert inline pricing entries to a temporary YAML file and
@@ -257,7 +323,6 @@ class AgentManager:
         """
         import yaml
 
-        provider_name = provider_cfg.kind
         models = []
         for entry in provider_cfg.pricing:
             models.append(

@@ -92,12 +92,14 @@ class TestAgentConfig:
         mock_builder = MagicMock(spec=SimplePromptBuilder)
 
         config = AgentConfig(
+            task_id="t1",
             agent_id="test-id",
             persona="You are a coder",
             tools=mock_tools,
             llm=mock_llm,
             prompt_builder=mock_builder,
         )
+        assert config.task_id == "t1"
         assert config.agent_id == "test-id"
         assert config.persona == "You are a coder"
         assert config.tools is mock_tools
@@ -107,6 +109,7 @@ class TestAgentConfig:
     def test_config_is_frozen(self) -> None:
         """AgentConfig should be immutable."""
         config = AgentConfig(
+            task_id="t1",
             agent_id="test-id",
             persona="coder",
             tools=MagicMock(),
@@ -119,6 +122,7 @@ class TestAgentConfig:
     def test_config_hashable(self) -> None:
         """Frozen config should be hashable."""
         config = AgentConfig(
+            task_id="t1",
             agent_id="test-id",
             persona="coder",
             tools=MagicMock(),
@@ -207,6 +211,7 @@ class TestAgent:
         builder = SimplePromptBuilder()
         builder.add_section("You are a coder")
         return AgentConfig(
+            task_id="00000000000000000000000000000000",
             agent_id="test-agent-123",
             persona="You are a coder",
             tools=MagicMock(spec=yt.ToolManager),
@@ -231,6 +236,7 @@ class TestAgent:
         agent = Agent(config=mock_config)
 
         # Config proxies
+        assert agent.task_id == "00000000000000000000000000000000"
         assert agent.agent_id == "test-agent-123"
         assert agent.persona == "You are a coder"
         assert agent.tools is mock_config.tools

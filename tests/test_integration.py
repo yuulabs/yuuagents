@@ -35,6 +35,7 @@ class TestAgentLifecycle:
 
         # We can't create YLLMClient without API key, but we can test the structure
         config = AgentConfig(
+            task_id="00000000000000000000000000000000",
             agent_id="test-agent",
             persona="test",
             tools=tools,
@@ -87,7 +88,8 @@ class TestAgentLifecycle:
         tools = yt.ToolManager([])
         builder = SimplePromptBuilder().add_section("test persona")
         config = AgentConfig(
-            agent_id="12345678123456781234567812345678",
+            task_id="12345678123456781234567812345678",
+            agent_id="test-agent",
             persona="test",
             tools=tools,
             llm=FakeLLM(),  # type: ignore[arg-type]
@@ -95,6 +97,7 @@ class TestAgentLifecycle:
         )
         agent = Agent(config=config)
         ctx = AgentContext(
+            task_id="12345678123456781234567812345678",
             agent_id="test-agent",
             workdir="/tmp",
             docker_container="dummy",
@@ -106,6 +109,56 @@ class TestAgentLifecycle:
         assert agent.total_tokens == 2
         assert agent.total_cost_usd == 0.002
 
+    async def test_manager_status_includes_last_assistant_message(self) -> None:
+        class FakeLLM:
+            default_model = "test-model"
+
+            async def stream(
+                self,
+                history: yuullm.History,
+                tools: list[dict[str, object]] | None = None,
+            ) -> tuple[AsyncIterator[yuullm.StreamItem], yuullm.Store]:
+                async def _iter() -> AsyncIterator[yuullm.StreamItem]:
+                    yield yuullm.Response(item="final answer")
+
+                return _iter(), {}
+
+        tools = yt.ToolManager([])
+        builder = SimplePromptBuilder().add_section("test persona")
+        config = AgentConfig(
+            task_id="12345678123456781234567812345678",
+            agent_id="test-agent",
+            persona="test",
+            tools=tools,
+            llm=FakeLLM(),  # type: ignore[arg-type]
+            prompt_builder=builder,
+        )
+        agent = Agent(config=config)
+        ctx = AgentContext(
+            task_id="12345678123456781234567812345678",
+            agent_id="test-agent",
+            workdir="/tmp",
+            docker_container="dummy",
+        )
+
+        await run_agent(agent, "hello", ctx)
+
+        cfg = Config()
+        docker = DockerManager(image=cfg.docker.image)
+        manager = AgentManager(cfg, docker)
+        manager._agents[agent.task_id] = agent
+
+        info = manager.status(agent.task_id)
+        assert info.last_assistant_message == "final answer"
+
+    async def test_manager_make_llm_sets_price_calculator_by_default(self) -> None:
+        cfg = Config()
+        docker = DockerManager(image=cfg.docker.image)
+        manager = AgentManager(cfg, docker)
+
+        llm = manager._make_llm("main")
+        assert llm.price_calculator is not None
+
     async def test_agent_state_transitions(self) -> None:
         """Should transition through states correctly."""
         tools = yt.ToolManager([])
@@ -113,6 +166,7 @@ class TestAgentLifecycle:
         builder.add_section("test")
 
         config = AgentConfig(
+            task_id="00000000000000000000000000000000",
             agent_id="test",
             persona="test",
             tools=tools,
@@ -150,6 +204,7 @@ class TestAgentLifecycle:
         builder.add_section("test")
 
         config = AgentConfig(
+            task_id="00000000000000000000000000000000",
             agent_id="test",
             persona="test",
             tools=tools,
@@ -260,7 +315,7 @@ docker:
   image: python:3.12
 providers:
   openai-default:
-    kind: openai
+    api_type: openai-chat-completion
     default_model: gpt-3.5-turbo
 """)
             f.flush()
@@ -288,6 +343,7 @@ class TestContextCreation:
     def test_create_context(self) -> None:
         """Should create context with required fields."""
         ctx = AgentContext(
+            task_id="t1",
             agent_id="test-agent",
             workdir="/root",
             docker_container="container-123",
@@ -302,6 +358,7 @@ class TestContextCreation:
     def test_context_queue(self) -> None:
         """Should have working input queue."""
         ctx = AgentContext(
+            task_id="t1",
             agent_id="test",
             workdir="/root",
             docker_container="c1",
@@ -346,13 +403,14 @@ class TestManagerIntegration:
                 tools=[],
             )
 
-            agent_id = await manager.submit(req)
-            assert len(agent_id) > 0
+            task_id = await manager.submit(req)
+            assert len(task_id) > 0
 
             # Should be in list
             agents = manager.list_agents()
             assert len(agents) == 1
-            assert agents[0].agent_id == agent_id
+            assert agents[0].task_id == task_id
+            assert agents[0].agent_id == "main"
         finally:
             await manager.stop()
 
@@ -371,13 +429,13 @@ class TestManagerIntegration:
                 tools=[],
             )
 
-            agent_id = await manager.submit(req)
+            task_id = await manager.submit(req)
 
             # Cancel immediately
-            await manager.cancel(agent_id)
+            await manager.cancel(task_id)
 
             # Check status
-            info = manager.status(agent_id)
+            info = manager.status(task_id)
             assert info.status == "cancelled"
         finally:
             await manager.stop()

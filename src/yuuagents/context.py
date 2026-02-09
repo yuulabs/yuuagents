@@ -19,6 +19,7 @@ class AgentContext:
     Each agent gets its own context instance.
     """
 
+    task_id: str
     agent_id: str
     workdir: str
     docker_container: str

@@ -63,7 +63,7 @@ class DockerManager:
 
     async def stop(self) -> None:
         # Clean up non-default containers we created
-        for agent_id, cid in list(self._containers.items()):
+        for task_id, cid in list(self._containers.items()):
             if cid != self.default_container:
                 await self._remove(cid)
         self._containers.clear()
@@ -78,11 +78,11 @@ class DockerManager:
     async def resolve(
         self,
         *,
-        agent_id: str = "",
+        task_id: str = "",
         container: str = "",
         image: str = "",
     ) -> str:
-        """Resolve a container for an agent.
+        """Resolve a container for a task.
 
         - ``container`` given → verify it exists and is running, then use it.
         - ``image`` given (without container) → create a new container from that image.
@@ -106,9 +106,9 @@ class DockerManager:
                 raise ValueError(f"container not found: {container}") from exc
 
         if image:
-            cid = await self._create(image=image, agent_id=agent_id)
-            if agent_id:
-                self._containers[agent_id] = cid
+            cid = await self._create(image=image, task_id=task_id)
+            if task_id:
+                self._containers[task_id] = cid
             return cid
 
         assert self.default_container
@@ -140,7 +140,7 @@ class DockerManager:
 
             async def _close_stream() -> None:
                 try:
-                    closed = stream.close()
+                    closed = stream.close() #type: ignore
                     if asyncio.iscoroutine(closed):
                         await closed
                 except Exception:
@@ -150,7 +150,7 @@ class DockerManager:
                 chunks: list[bytes] = []
                 try:
                     while True:
-                        msg = await stream.read_out()
+                        msg = await stream.read_out() #type:ignore
                         if msg is None:
                             break
                         data = getattr(msg, "data", b"")
@@ -175,9 +175,9 @@ class DockerManager:
             return await _exec_with_shell("sh")
         return result
 
-    async def cleanup(self, agent_id: str) -> None:
-        """Remove a per-agent container (if we created one)."""
-        cid = self._containers.pop(agent_id, None)
+    async def cleanup(self, task_id: str) -> None:
+        """Remove a per-task container (if we created one)."""
+        cid = self._containers.pop(task_id, None)
         if cid and cid != self.default_container:
             await self._remove(cid)
 
@@ -207,7 +207,7 @@ class DockerManager:
         *,
         image: str = "",
         name: str = "",
-        agent_id: str = "",
+        task_id: str = "",
     ) -> str:
         assert self._client is not None
         image = image or self.image
@@ -238,8 +238,8 @@ class DockerManager:
                 ],
             },
         }
-        if agent_id:
-            config["Labels"] = {"yagents.agent_id": agent_id}
+        if task_id:
+            config["Labels"] = {"yagents.task_id": task_id}
 
         container = await self._client.containers.create_or_replace(
             name=name,

@@ -42,6 +42,7 @@ class SimplePromptBuilder:
 class AgentConfig:
     """Immutable agent configuration — created once, never changes."""
 
+    task_id: str
     agent_id: str
     persona: str
     tools: yt.ToolManager
@@ -71,6 +72,10 @@ class Agent:
     state: AgentState = field(factory=AgentState)
 
     # Proxy properties for convenience
+    @property
+    def task_id(self) -> str:
+        return self.config.task_id
+
     @property
     def agent_id(self) -> str:
         return self.config.agent_id

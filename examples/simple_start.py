@@ -35,7 +35,7 @@ def check_prerequisites():
     try:
         subprocess.run(["yagents", "--version"], capture_output=True, check=True)
         print("  ✓ yagents 已安装")
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except FileNotFoundError, subprocess.CalledProcessError:
         print("  ✗ yagents 未安装")
         print("\n请先安装: pip install -e .")
         sys.exit(1)
@@ -46,7 +46,7 @@ def check_prerequisites():
             ["docker", "--version"], capture_output=True, text=True, check=True
         )
         print(f"  ✓ Docker 已安装: {result.stdout.strip()}")
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except FileNotFoundError, subprocess.CalledProcessError:
         print("  ✗ Docker 未安装")
         print("\n请先安装: https://docs.docker.com/engine/install/")
         sys.exit(1)
@@ -75,7 +75,7 @@ def configure_provider():
 
     provider_name, api_key_env, default_model = providers[choice]
 
-    api_key = input(f"\n请输入 API Key: ").strip()
+    api_key = input("\n请输入 API Key: ").strip()
     os.environ[api_key_env] = api_key
 
     if choice == "4":
@@ -110,9 +110,9 @@ def setup_yagents(config: dict):
     overrides = {
         "providers": {
             config["provider_name"]: {
-                "kind": "openai"
-                if "anthropic" not in config["provider_name"].lower()
-                else "anthropic",
+                "api_type": "anthropic-messages"
+                if "anthropic" in config["provider_name"].lower()
+                else "openai-chat-completion",
                 "api_key_env": config["api_key_env"],
                 "default_model": config["model"],
                 "base_url": config["base_url"],
