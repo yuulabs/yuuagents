@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -75,6 +74,7 @@ class AgentManager:
         )
 
         container_id = await self.docker.resolve(
+            agent_id=agent_id,
             container=req.container,
             image=req.image,
         )

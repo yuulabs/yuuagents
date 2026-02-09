@@ -6,6 +6,8 @@ import shlex
 
 import yuutools as yt
 
+from yuuagents.context import DockerExecutor
+
 
 @yt.tool(
     params={"path": "Absolute file path to read"},
@@ -14,7 +16,7 @@ import yuutools as yt
 async def read_file(
     path: str,
     container: str = yt.depends(lambda ctx: ctx.docker_container),
-    docker: object = yt.depends(lambda ctx: ctx.docker),
+    docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
 ) -> str:
     cmd = f"cat {shlex.quote(path)}"
     return await docker.exec(container, cmd, timeout=30)
@@ -31,7 +33,7 @@ async def write_file(
     path: str,
     content: str,
     container: str = yt.depends(lambda ctx: ctx.docker_container),
-    docker: object = yt.depends(lambda ctx: ctx.docker),
+    docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
 ) -> str:
     safe_path = shlex.quote(path)
     cmd = f"mkdir -p $(dirname {safe_path}) && cat > {safe_path} << 'YUUEOF'\n{content}\nYUUEOF"
@@ -45,7 +47,7 @@ async def write_file(
 async def delete_file(
     path: str,
     container: str = yt.depends(lambda ctx: ctx.docker_container),
-    docker: object = yt.depends(lambda ctx: ctx.docker),
+    docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
 ) -> str:
     cmd = f"rm -f {shlex.quote(path)}"
     return await docker.exec(container, cmd, timeout=30)

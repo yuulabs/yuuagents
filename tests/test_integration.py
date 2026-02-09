@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
+from collections.abc import AsyncIterator
 import os
 import tempfile
 from pathlib import Path
 
 import pytest
+import yuullm
 import yuutools as yt
 
-from yuuagents.agent import Agent, AgentConfig, AgentState, SimplePromptBuilder
+from yuuagents.agent import Agent, AgentConfig, SimplePromptBuilder
 from yuuagents.config import Config, load as load_config
 from yuuagents.context import AgentContext
 from yuuagents.daemon.docker import DockerManager
 from yuuagents.daemon.manager import AgentManager
+from yuuagents.loop import run as run_agent
 from yuuagents.skills.discovery import scan
 from yuuagents.tools import BUILTIN_TOOLS, get
 from yuuagents.types import AgentStatus, TaskRequest
@@ -49,6 +51,60 @@ class TestAgentLifecycle:
         assert agent.status == AgentStatus.RUNNING
         assert agent.task == "test task"
         assert len(agent.history) == 2
+
+    async def test_agent_run_records_usage_without_explicit_tracing_setup(self) -> None:
+        class FakeLLM:
+            default_model = "test-model"
+
+            async def stream(
+                self,
+                history: yuullm.History,
+                tools: list[dict[str, object]] | None = None,
+            ) -> tuple[AsyncIterator[yuullm.StreamItem], yuullm.Store]:
+                async def _iter() -> AsyncIterator[yuullm.StreamItem]:
+                    yield yuullm.Response(item="hi")
+
+                store: yuullm.Store = {
+                    "usage": yuullm.Usage(
+                        provider="test-provider",
+                        model="test-model",
+                        request_id="req_1",
+                        input_tokens=1,
+                        output_tokens=1,
+                        cache_read_tokens=0,
+                        cache_write_tokens=0,
+                        total_tokens=2,
+                    ),
+                    "cost": yuullm.Cost(
+                        input_cost=0.001,
+                        output_cost=0.001,
+                        total_cost=0.002,
+                        source="test",
+                    ),
+                }
+                return _iter(), store
+
+        tools = yt.ToolManager([])
+        builder = SimplePromptBuilder().add_section("test persona")
+        config = AgentConfig(
+            agent_id="12345678123456781234567812345678",
+            persona="test",
+            tools=tools,
+            llm=FakeLLM(),  # type: ignore[arg-type]
+            prompt_builder=builder,
+        )
+        agent = Agent(config=config)
+        ctx = AgentContext(
+            agent_id="test-agent",
+            workdir="/tmp",
+            docker_container="dummy",
+        )
+
+        await run_agent(agent, "hello", ctx)
+        assert agent.status == AgentStatus.DONE
+        assert agent.steps == 1
+        assert agent.total_tokens == 2
+        assert agent.total_cost_usd == 0.002
 
     async def test_agent_state_transitions(self) -> None:
         """Should transition through states correctly."""
@@ -212,7 +268,9 @@ providers:
             try:
                 config = load_config(f.name)
                 assert config.docker.image == "python:3.12"
-                assert config.providers["openai-default"].default_model == "gpt-3.5-turbo"
+                assert (
+                    config.providers["openai-default"].default_model == "gpt-3.5-turbo"
+                )
             finally:
                 os.unlink(f.name)
 

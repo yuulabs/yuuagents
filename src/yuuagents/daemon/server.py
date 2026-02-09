@@ -35,7 +35,9 @@ async def serve(config: Config) -> None:
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(_shutdown(server, manager)))
+        loop.add_signal_handler(
+            sig, lambda: asyncio.create_task(_shutdown(server, manager))
+        )
 
     try:
         await server.serve()

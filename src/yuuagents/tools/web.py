@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 import yuutools as yt
 
 
@@ -17,10 +19,9 @@ async def web_search(
     max_results: int = 5,
     api_key: str = yt.depends(lambda ctx: ctx.tavily_api_key),
 ) -> str:
-    from tavily import AsyncTavilyClient
-
     max_results = max(1, min(max_results, 10))
-    client = AsyncTavilyClient(api_key=api_key)
+    tavily = importlib.import_module("tavily")
+    client = tavily.AsyncTavilyClient(api_key=api_key)
     resp = await client.search(query=query, max_results=max_results)
 
     parts: list[str] = []

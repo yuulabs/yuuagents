@@ -94,7 +94,7 @@ def status() -> str:
             timeout=10,
         )
         return result.stdout or result.stderr or "unknown"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError, subprocess.TimeoutExpired:
         return "systemctl not available"
 
 
@@ -105,8 +105,7 @@ def _systemctl(*args: str, ignore_errors: bool = False) -> None:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if result.returncode != 0 and not ignore_errors:
             raise RuntimeError(
-                f"systemctl failed: {' '.join(cmd)}\n"
-                f"stderr: {result.stderr.strip()}"
+                f"systemctl failed: {' '.join(cmd)}\nstderr: {result.stderr.strip()}"
             )
     except FileNotFoundError:
         if not ignore_errors:

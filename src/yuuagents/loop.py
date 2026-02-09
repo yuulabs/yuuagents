@@ -18,6 +18,7 @@ async def run(agent: Agent, task: str, ctx: AgentContext) -> None:
     """Run the agent loop until completion or error."""
     agent.setup(task)
 
+    ytrace.init(service_name="yuuagents")
     with ytrace.conversation(
         id=UUID(agent.agent_id),
         agent=agent.persona[:80],
@@ -34,7 +35,9 @@ async def run(agent: Agent, task: str, ctx: AgentContext) -> None:
                 raise
 
 
-async def _step(agent: Agent, chat: Any, ctx: AgentContext) -> None:
+async def _step(
+    agent: Agent, chat: ytrace.ConversationContext, ctx: AgentContext
+) -> None:
     """Execute one LLM call + tool round."""
     # 1. Call LLM
     with chat.llm_gen() as gen:
@@ -52,7 +55,7 @@ async def _step(agent: Agent, chat: Any, ctx: AgentContext) -> None:
         usage = store.get("usage")
         if usage is not None:
             ytrace.record_llm_usage(
-                usage=ytrace.LlmUsageDelta(
+                ytrace.LlmUsageDelta(
                     provider=usage.provider,
                     model=usage.model,
                     request_id=usage.request_id,
@@ -61,7 +64,7 @@ async def _step(agent: Agent, chat: Any, ctx: AgentContext) -> None:
                     cache_read_tokens=usage.cache_read_tokens,
                     cache_write_tokens=usage.cache_write_tokens,
                     total_tokens=usage.total_tokens,
-                )
+                ),
             )
             agent.total_tokens += usage.input_tokens + usage.output_tokens
 

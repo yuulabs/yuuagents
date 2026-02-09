@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import yuutools as yt
 
+from yuuagents.context import DockerExecutor
+
 
 @yt.tool(
     params={
@@ -16,7 +18,7 @@ async def execute_bash(
     command: str,
     timeout: int = 120,
     container: str = yt.depends(lambda ctx: ctx.docker_container),
-    docker: object = yt.depends(lambda ctx: ctx.docker),
+    docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
 ) -> str:
     timeout = max(1, min(timeout, 600))
     return await docker.exec(container, command, timeout)

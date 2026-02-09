@@ -11,3 +11,4 @@ wheels/
 
 # Local config overrides (may contain secrets / personal preferences)
 config.overrides.toml
+*_cache/

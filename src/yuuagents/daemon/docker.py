@@ -78,38 +78,39 @@ class DockerManager:
     async def resolve(
         self,
         *,
+        agent_id: str = "",
         container: str = "",
         image: str = "",
     ) -> str:
         """Resolve a container for an agent.
 
+        - ``container`` given → verify it exists and is running, then use it.
+        - ``image`` given (without container) → create a new container from that image.
         - No args → use the shared default container.
-        - ``container`` given → use that existing container (fail if not found).
-        - ``image`` given → create a new container from that image.
-        - Both given → error.
         """
         await self._ensure_started()
+
         if container and image:
-            raise ValueError("Specify either --container or --image, not both")
+            raise ValueError("Provide either container or image, not both")
 
         if container:
-            # Fail-fast: verify it exists
             assert self._client is not None
             try:
                 c = self._client.containers.container(container)
-                await c.show()
+                info = await c.show()
+                if not info["State"]["Running"]:
+                    await c.start()
+                    info = await c.show()
+                return info["Id"]
             except Exception as exc:
-                raise ValueError(
-                    f"Container {container!r} not found or not accessible"
-                ) from exc
-            return container
+                raise ValueError(f"container not found: {container}") from exc
 
         if image:
-            # Create a new container specifically for this agent
-            agent_id = ""
-            return await self._create(image=image, name="", agent_id=agent_id)
+            cid = await self._create(image=image, agent_id=agent_id)
+            if agent_id:
+                self._containers[agent_id] = cid
+            return cid
 
-        # No args → use default container
         assert self.default_container
         return self.default_container
 

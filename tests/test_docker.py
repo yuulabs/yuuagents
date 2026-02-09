@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import pytest
 
@@ -134,7 +135,9 @@ class TestDockerManagerResolve:
         try:
             await manager.start()
             with pytest.raises(ValueError):
-                await manager.resolve(container="nonexistent-container-12345")
+                await manager.resolve(
+                    container=f"nonexistent-container-{uuid.uuid4().hex}"
+                )
         finally:
             await manager.stop()
 

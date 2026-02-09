@@ -24,8 +24,7 @@ def get(names: list[str]) -> list:
     for n in names:
         if n not in BUILTIN_TOOLS:
             raise KeyError(
-                f"unknown builtin tool {n!r}; "
-                f"available: {list(BUILTIN_TOOLS)}"
+                f"unknown builtin tool {n!r}; available: {list(BUILTIN_TOOLS)}"
             )
         out.append(BUILTIN_TOOLS[n])
     return out

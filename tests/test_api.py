@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-from datetime import datetime, timezone
-from pathlib import Path
-
 import pytest
 from starlette.testclient import TestClient
 
@@ -14,7 +9,6 @@ from yuuagents.config import Config
 from yuuagents.daemon.api import create_app
 from yuuagents.daemon.docker import DockerManager
 from yuuagents.daemon.manager import AgentManager
-from yuuagents.types import AgentStatus
 
 
 @pytest.fixture

@@ -19,7 +19,6 @@ from yuuagents.config import (
     _deep_merge,
     find_project_root,
     load as load_config,
-    load_merged,
 )
 from typing import TYPE_CHECKING
 
@@ -104,9 +103,7 @@ def setup(
     if config_path:
         # User provided a full config — requires confirmation
         click.echo(f"Config file:   {config_path}")
-        click.echo(
-            "WARNING: --config fully replaces the default configuration."
-        )
+        click.echo("WARNING: --config fully replaces the default configuration.")
         if not click.confirm("Are you sure you want to proceed?"):
             click.echo("Aborted.")
             sys.exit(0)
@@ -124,6 +121,7 @@ def setup(
         merged_data = user_data
     else:
         # Auto-detect project root for config.example.yaml
+        root: Path | None
         if project_dir:
             root = Path(project_dir)
         else:
@@ -150,9 +148,7 @@ def setup(
             base_data = _deep_merge(base_data, over_data)
             click.echo(f"Overrides:     {proj_overrides}")
         else:
-            click.echo(
-                f"Overrides:     (none — {_PROJECT_OVERRIDES_NAME} not found)"
-            )
+            click.echo(f"Overrides:     (none — {_PROJECT_OVERRIDES_NAME} not found)")
 
         # Apply CLI --overrides on top
         if overrides_path:
@@ -181,8 +177,8 @@ def setup(
     errors = cfg.validate()
     if errors:
         click.echo("  WARNING: configuration has validation errors:", err=True)
-        for e in errors:
-            click.echo(f"    - {e}", err=True)
+        for err in errors:
+            click.echo(f"    - {err}", err=True)
 
     # -- Step 2: create directories --
     click.echo()
@@ -283,7 +279,7 @@ def _docker_available() -> bool:
             timeout=10,
         )
         return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError, subprocess.TimeoutExpired:
         return False
 
 
@@ -296,7 +292,7 @@ def _image_exists(image: str) -> bool:
             timeout=10,
         )
         return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError, subprocess.TimeoutExpired:
         return False
 
 
@@ -375,7 +371,9 @@ def config(
                     for name, a in cfg.agents.items()
                 },
             }
-            click.echo(yaml.dump(config_dict, default_flow_style=False, allow_unicode=True))
+            click.echo(
+                yaml.dump(config_dict, default_flow_style=False, allow_unicode=True)
+            )
         except Exception as e:
             click.echo(f"Error loading config: {e}", err=True)
             sys.exit(1)
@@ -408,7 +406,9 @@ def config(
             )
             sys.exit(1)
 
-        base_data = yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        base_data = (
+            yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        )
         click.echo(f"Base config:   {DEFAULT_CONFIG_PATH}")
 
         if overrides_path:
@@ -433,8 +433,8 @@ def config(
     errors = cfg.validate()
     if errors:
         click.echo("  WARNING: configuration has validation errors:", err=True)
-        for e in errors:
-            click.echo(f"    - {e}", err=True)
+        for err in errors:
+            click.echo(f"    - {err}", err=True)
 
     # Hot-reload daemon if running
     click.echo()
@@ -448,8 +448,13 @@ def config(
         else:
             click.echo(f"  WARNING: {result.get('error', 'Unknown error')}", err=True)
     except Exception as e:
-        click.echo(f"  WARNING: Could not reload daemon (is it running?): {e}", err=True)
-        click.echo("  The config file has been updated, but you may need to restart the daemon.", err=True)
+        click.echo(
+            f"  WARNING: Could not reload daemon (is it running?): {e}", err=True
+        )
+        click.echo(
+            "  The config file has been updated, but you may need to restart the daemon.",
+            err=True,
+        )
     finally:
         c.close()
 
