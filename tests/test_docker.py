@@ -6,6 +6,7 @@ import asyncio
 import uuid
 
 import pytest
+import pytest_asyncio
 
 from yuuagents.daemon.docker import (
     DOCKER_SYSTEM_PROMPT,
@@ -13,8 +14,18 @@ from yuuagents.daemon.docker import (
 )
 
 
+@pytest_asyncio.fixture
+async def started_docker_manager() -> DockerManager: #type:ignore
+    manager = DockerManager()
+    await manager.start()
+    try:
+        yield manager
+    finally:
+        await manager.stop()
+
+
+
 class TestDockerSystemPrompt:
-    """Tests for DOCKER_SYSTEM_PROMPT constant."""
 
     def test_is_string(self) -> None:
         """Should be a string."""
@@ -90,158 +101,129 @@ class TestDockerManagerLifecycle:
 class TestDockerManagerResolve:
     """Tests for resolve() method — requires Docker."""
 
-    async def test_resolve_no_args_uses_default(self) -> None:
+    async def test_resolve_no_args_uses_default(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """resolve() with no args should return default container."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            container_id = await manager.resolve()
-            assert container_id == manager.default_container_id
-            assert len(container_id) > 0
-        finally:
-            await manager.stop()
+        manager = started_docker_manager
+        container_id = await manager.resolve()
+        assert container_id == manager.default_container_id
+        assert len(container_id) > 0
 
-    async def test_resolve_with_image_creates_new(self) -> None:
+    async def test_resolve_with_image_creates_new(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """resolve() with image should create new container."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            container_id = await manager.resolve(image="alpine:latest")
-            assert container_id != manager.default_container_id
-            assert len(container_id) > 0
+        manager = started_docker_manager
+        task_id = uuid.uuid4().hex
+        container_id = await manager.resolve(task_id=task_id, image="alpine:latest")
+        assert container_id != manager.default_container_id
+        assert len(container_id) > 0
 
-            # Verify container works by executing a command (public behavior)
-            result = await manager.exec(container_id, "echo alpine-test", timeout=30)
-            assert "alpine-test" in result
-        finally:
-            await manager.stop()
+        result = await manager.exec(container_id, "echo alpine-test", timeout=30)
+        assert "alpine-test" in result
 
-    async def test_resolve_with_existing_container(self) -> None:
+    async def test_resolve_with_existing_container(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """resolve() with container ID should verify it exists."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            default_id = manager.default_container_id
+        manager = started_docker_manager
+        default_id = manager.default_container_id
 
-            # Should return the same container
-            resolved = await manager.resolve(container=default_id)
-            assert resolved == default_id
-        finally:
-            await manager.stop()
+        resolved = await manager.resolve(container=default_id)
+        assert resolved == default_id
 
-    async def test_resolve_nonexistent_container_raises(self) -> None:
+    async def test_resolve_nonexistent_container_raises(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """resolve() with nonexistent container should raise ValueError."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            with pytest.raises(ValueError):
-                await manager.resolve(
-                    container=f"nonexistent-container-{uuid.uuid4().hex}"
-                )
-        finally:
-            await manager.stop()
+        manager = started_docker_manager
+        with pytest.raises(ValueError):
+            await manager.resolve(container=f"nonexistent-container-{uuid.uuid4().hex}")
 
-    async def test_resolve_both_container_and_image_raises(self) -> None:
+    async def test_resolve_both_container_and_image_raises(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """resolve() with both container and image should raise ValueError."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            with pytest.raises(ValueError) as exc_info:
-                await manager.resolve(container="c1", image="ubuntu")
-            assert "not both" in str(exc_info.value)
-        finally:
-            await manager.stop()
+        manager = started_docker_manager
+        with pytest.raises(ValueError) as exc_info:
+            await manager.resolve(container="c1", image="ubuntu")
+        assert "not both" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
 class TestDockerManagerExec:
     """Tests for exec() method — requires Docker."""
 
-    async def test_exec_runs_command(self) -> None:
+    async def test_exec_runs_command(self, started_docker_manager: DockerManager) -> None:
         """exec() should run command in container."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            container_id = manager.default_container_id
+        manager = started_docker_manager
+        container_id = manager.default_container_id
 
-            result = await manager.exec(container_id, "echo hello", timeout=30)
-            assert "hello" in result
-        finally:
-            await manager.stop()
+        result = await manager.exec(container_id, "echo hello", timeout=30)
+        assert "hello" in result
 
-    async def test_exec_returns_stderr(self) -> None:
+    async def test_exec_returns_stderr(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """exec() should capture stderr."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            container_id = manager.default_container_id
+        manager = started_docker_manager
+        container_id = manager.default_container_id
 
-            result = await manager.exec(container_id, "echo error >&2", timeout=30)
-            assert "error" in result
-        finally:
-            await manager.stop()
+        result = await manager.exec(container_id, "echo error >&2", timeout=30)
+        assert "error" in result
 
-    async def test_exec_timeout(self) -> None:
+    async def test_exec_timeout(self, started_docker_manager: DockerManager) -> None:
         """exec() should timeout on long-running commands."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            container_id = manager.default_container_id
+        manager = started_docker_manager
+        container_id = manager.default_container_id
 
-            result = await manager.exec(container_id, "sleep 10", timeout=1)
-            assert "timed out" in result.lower()
-        finally:
-            await manager.stop()
+        result = await manager.exec(container_id, "sleep 10", timeout=1)
+        assert "timed out" in result.lower()
 
-    async def test_exec_multiple_commands(self) -> None:
+    async def test_exec_multiple_commands(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """exec() should handle multiple commands."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            container_id = manager.default_container_id
+        manager = started_docker_manager
+        container_id = manager.default_container_id
 
-            # Test pwd
-            result = await manager.exec(container_id, "pwd", timeout=30)
-            assert "/home/yuu" in result
+        result = await manager.exec(container_id, "pwd", timeout=30)
+        assert "/home/yuu" in result
 
-            # Test ls
-            result = await manager.exec(container_id, "ls -la", timeout=30)
-            assert "total" in result or "drwx" in result
-        finally:
-            await manager.stop()
+        result = await manager.exec(container_id, "ls -la", timeout=30)
+        assert "total" in result or "drwx" in result
 
 
 @pytest.mark.asyncio
 class TestDockerManagerCleanup:
     """Tests for cleanup() method — requires Docker."""
 
-    async def test_cleanup_removes_container(self) -> None:
+    async def test_cleanup_removes_container(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """cleanup() should remove per-agent container."""
-        manager = DockerManager()
-        try:
-            await manager.start()
+        manager = started_docker_manager
+        task_id = uuid.uuid4().hex
 
-            # Create a new container
-            container_id = await manager.resolve(image="alpine:latest")
+        container_id = await manager.resolve(task_id=task_id, image="alpine:latest")
+        result = await manager.exec(container_id, "echo before", timeout=30)
+        assert "before" in result
 
-            # Verify container works
-            result = await manager.exec(container_id, "echo before", timeout=30)
-            assert "before" in result
+        await manager.cleanup(task_id)
+        with pytest.raises(ValueError):
+            await manager.resolve(container=container_id)
 
-            # Cleanup by creating a new container with same agent context
-            # This tests the public behavior that cleanup removes containers
-            new_id = await manager.resolve(image="alpine:latest")
-            result = await manager.exec(new_id, "echo after", timeout=30)
-            assert "after" in result
-        finally:
-            await manager.stop()
+        new_id = await manager.resolve(task_id=task_id, image="alpine:latest")
+        result = await manager.exec(new_id, "echo after", timeout=30)
+        assert "after" in result
 
     async def test_cleanup_unknown_agent(self) -> None:
         """cleanup() should handle unknown agent gracefully."""
         manager = DockerManager()
+        await manager.start()
         try:
-            await manager.start()
-            await manager.cleanup("unknown-agent")  # Should not raise
+            await manager.cleanup("unknown-agent")
         finally:
             await manager.stop()
 
@@ -250,55 +232,46 @@ class TestDockerManagerCleanup:
 class TestDockerManagerProperties:
     """Tests for DockerManager properties."""
 
-    async def test_default_container_id_property(self) -> None:
+    async def test_default_container_id_property(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """default_container_id property should return default container."""
         manager = DockerManager()
         assert manager.default_container_id == ""
 
-        try:
-            await manager.start()
-            assert len(manager.default_container_id) > 0
-        finally:
-            await manager.stop()
+        manager = started_docker_manager
+        assert len(manager.default_container_id) > 0
 
 
 @pytest.mark.asyncio
 class TestDockerManagerConcurrency:
     """Tests for concurrent operations — requires Docker."""
 
-    async def test_concurrent_exec(self) -> None:
+    async def test_concurrent_exec(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """Should handle concurrent exec calls."""
-        manager = DockerManager()
-        try:
-            await manager.start()
-            container_id = manager.default_container_id
+        manager = started_docker_manager
+        container_id = manager.default_container_id
 
-            # Run multiple commands concurrently
-            tasks = [
-                manager.exec(container_id, f"echo {i}", timeout=30) for i in range(5)
-            ]
-            results = await asyncio.gather(*tasks)
+        tasks = [manager.exec(container_id, f"echo {i}", timeout=30) for i in range(5)]
+        results = await asyncio.gather(*tasks)
 
-            for i, result in enumerate(results):
-                assert str(i) in result
-        finally:
-            await manager.stop()
+        for i, result in enumerate(results):
+            assert str(i) in result
 
-    async def test_multiple_containers(self) -> None:
+    async def test_multiple_containers(
+        self, started_docker_manager: DockerManager
+    ) -> None:
         """Should handle multiple containers."""
-        manager = DockerManager()
-        try:
-            await manager.start()
+        manager = started_docker_manager
 
-            # Create multiple containers
-            containers = []
-            for i in range(3):
-                cid = await manager.resolve(image="alpine:latest")
-                containers.append(cid)
+        containers = []
+        for _ in range(3):
+            task_id = uuid.uuid4().hex
+            cid = await manager.resolve(task_id=task_id, image="alpine:latest")
+            containers.append(cid)
 
-            # Each container should be independent
-            for i, cid in enumerate(containers):
-                result = await manager.exec(cid, f"echo container{i}", timeout=30)
-                assert f"container{i}" in result
-        finally:
-            await manager.stop()
+        for i, cid in enumerate(containers):
+            result = await manager.exec(cid, f"echo container{i}", timeout=30)
+            assert f"container{i}" in result
