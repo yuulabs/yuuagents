@@ -110,8 +110,14 @@ Skills 是可复用的工具集合，通过文件系统发现：
 yuuagents 包含一个 HTTP Daemon，提供 REST API 管理代理：
 
 ```bash
-# 启动守护进程
-uv run yagents start
+# 配置环境变量（推荐用 .env）
+cp .env.example .env
+
+# 启动守护进程（会自动搜索并加载 .env）
+uv run yagents up
+
+# 或者显式指定 .env 路径
+uv run yagents up --dot-env /path/to/.env
 
 # 提交任务
 uv run yagents run --persona "coder" --task "创建 Flask 应用"
@@ -433,15 +439,14 @@ if __name__ == "__main__":
 ### CLI 完整工作流
 
 ```bash
-# 1. 配置环境
-export OPENAI_API_KEY="sk-xxx"
-export TAVILY_API_KEY="tvly-xxx"
+# 1. 配置环境（推荐用 .env）
+cp .env.example .env
 
 # 2. 启动守护进程
-uv run yagents start
+uv run yagents up
 
-# 3. 查看状态
-uv run yagents status
+# 3. 查看任务列表
+uv run yagents list
 
 # 4. 提交代码生成任务
 uv run yagents run \
@@ -456,11 +461,12 @@ uv run yagents run \
 # 6. 列出所有 Agent
 uv run yagents list
 
-# 7. 查看特定 Agent 详情
-uv run yagents get <agent-id>
+# 7. 查看特定任务状态/日志
+uv run yagents status <task-id>
+uv run yagents logs <task-id>
 
 # 8. 停止守护进程
-uv run yagents stop
+uv run yagents down
 ```
 
 ---
@@ -487,7 +493,7 @@ uv run mypy src/
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                        CLI                              │
-│  (uv run yagents start/run/stop/status/list/get)       │
+│  (uv run yagents up/down/run/list/status/logs/input)   │
 └───────────────────────┬─────────────────────────────────┘
                         │ HTTP over Unix Socket
                         ▼

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import signal
+import socket
+from pathlib import Path
 
 import uvicorn
 
@@ -30,6 +33,8 @@ async def serve(config: Config) -> None:
     sock_path = config.socket_path
     sock_path.parent.mkdir(parents=True, exist_ok=True)
     if sock_path.exists():
+        if _can_connect(sock_path):
+            raise RuntimeError(f"daemon already running (socket: {sock_path})")
         sock_path.unlink()
 
     uds_config = uvicorn.Config(
@@ -54,3 +59,20 @@ async def serve(config: Config) -> None:
 
 async def _shutdown(server: uvicorn.Server) -> None:
     server.should_exit = True
+
+
+def _can_connect(sock_path: str | Path) -> bool:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(0.2)
+    try:
+        sock.connect(str(sock_path))
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        if e.errno in (errno.ENOENT, errno.ECONNREFUSED, errno.ENOTSOCK, errno.EINVAL):
+            return False
+        raise
+    else:
+        return True
+    finally:
+        sock.close()

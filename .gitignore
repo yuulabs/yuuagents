@@ -10,5 +10,7 @@ wheels/
 .venv
 
 # Local config overrides (may contain secrets / personal preferences)
-config.overrides.toml
+config.yaml
+config.overrides.yaml
 *_cache/
+.env

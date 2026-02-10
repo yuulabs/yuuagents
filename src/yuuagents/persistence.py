@@ -406,7 +406,7 @@ class TaskPersistence:
         async with self._session()() as session:
             async with session.begin():
                 res: Any = await session.execute(insert_cp)
-                if res.rowcount and res.rowcount > 0: #type:ignore
+                if res.rowcount and res.rowcount > 0:  # type:ignore
                     await session.execute(
                         update(TaskRow)
                         .where(TaskRow.task_id == task_id)

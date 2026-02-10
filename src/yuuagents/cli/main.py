@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -25,6 +27,40 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from yuuagents.cli.client import YAgentsClient
+
+
+_DOTENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _find_dotenv(start_dir: Path) -> Path | None:
+    home = Path.home().resolve()
+    cur = start_dir.resolve()
+    while True:
+        candidate = cur / ".env"
+        if candidate.exists() and candidate.is_file():
+            return candidate
+        if cur == home or cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+def _load_dotenv_file(path: Path) -> None:
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        key, sep, value = line.partition("=")
+        assert sep == "=", f"Invalid .env line (missing '='): {raw_line!r}"
+        key = key.strip()
+        assert key, f"Invalid .env line (empty key): {raw_line!r}"
+        assert _DOTENV_KEY_RE.match(key), f"Invalid .env key: {key!r}"
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key not in os.environ:
+            os.environ[key] = value
 
 
 def _socket(ctx: click.Context) -> str:
@@ -221,13 +257,18 @@ def install(
     image = cfg.docker.image
     click.echo(f"  Image: {image}")
 
-    if not _docker_available():
+    docker_ok, docker_detail = _docker_check()
+    if not docker_ok:
         click.echo(
-            "  WARNING: Docker is not installed or not running.\n"
-            "  yagents requires Docker to function. Please install Docker:\n"
-            "    https://docs.docker.com/engine/install/\n"
-            "  You may need to run: sudo apt install docker.io && sudo usermod -aG docker $USER\n"
-            f"  Then run `docker pull {image}` manually.",
+            "  WARNING: Docker is not usable from this environment.\n"
+            f"  Details: {docker_detail}\n"
+            "  yagents requires a reachable Docker daemon.\n"
+            "  Install Docker Engine: https://docs.docker.com/engine/install/\n"
+            "  Common fixes:\n"
+            "    - Start the daemon: sudo systemctl start docker\n"
+            "    - Fix permissions: sudo usermod -aG docker $USER (then re-login)\n"
+            "    - If you use rootless Docker, ensure DOCKER_HOST is set correctly\n"
+            f"  Then run `docker pull {image}` manually if needed.",
             err=True,
         )
     else:
@@ -323,16 +364,8 @@ def uninstall(ctx: click.Context) -> None:
 
 
 def _docker_available() -> bool:
-    """Check if Docker CLI is available and daemon is running."""
-    try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except FileNotFoundError, subprocess.TimeoutExpired:
-        return False
+    ok, _detail = _docker_check()
+    return ok
 
 
 def _image_exists(image: str) -> bool:
@@ -341,11 +374,62 @@ def _image_exists(image: str) -> bool:
         result = subprocess.run(
             ["docker", "image", "inspect", image],
             capture_output=True,
+            text=True,
             timeout=10,
         )
         return result.returncode == 0
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _docker_check() -> tuple[bool, str]:
+    timeout_s = _docker_timeout_seconds()
+    try:
+        version = subprocess.run(
+            ["docker", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError:
+        return False, "docker CLI not found on PATH"
+    except subprocess.TimeoutExpired:
+        return False, "docker --version timed out"
+
+    try:
+        server = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        v = (version.stdout or version.stderr or "").strip()
+        return False, f"{v or 'docker'}; docker daemon check timed out after {timeout_s}s"
+
+    if server.returncode == 0:
+        return True, ""
+
+    v = (version.stdout or version.stderr or "docker").strip()
+    raw = (server.stderr or server.stdout or "").strip()
+    first_line = (
+        raw.splitlines()[0].strip() if raw else f"docker version exited {server.returncode}"
+    )
+    lower = raw.lower()
+    if "permission denied" in lower:
+        return False, f"{v}; permission denied connecting to daemon ({first_line})"
+    if "cannot connect to the docker daemon" in lower or "is the docker daemon running" in lower:
+        return False, f"{v}; daemon not reachable ({first_line})"
+    if "context" in lower and "not found" in lower:
+        return False, f"{v}; docker context error ({first_line})"
+    return False, f"{v}; docker daemon check failed ({first_line})"
+
+
+def _docker_timeout_seconds() -> int:
+    raw = os.environ.get("YAGENTS_DOCKER_TIMEOUT", "").strip()
+    if raw.isdigit():
+        return max(5, min(int(raw), 120))
+    return 30
 
 
 # ── Configuration management ──
@@ -523,18 +607,41 @@ def config(
 @cli.command()
 @click.option("--config", "config_path", default=None, help="Config file path")
 @click.option("-d", "--daemon", is_flag=True, default=False, help="Run in background")
+@click.option(
+    "--dot-env",
+    "dot_env_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Load environment variables from a .env file",
+)
 @click.pass_context
-def up(ctx: click.Context, config_path: str | None, daemon: bool) -> None:
+def up(
+    ctx: click.Context,
+    config_path: str | None,
+    daemon: bool,
+    dot_env_path: str | None,
+) -> None:
     """Start the yagents daemon."""
-    if daemon:
-        try:
-            from yuuagents.cli.service import start as start_service
+    used_dotenv: Path | None = None
+    if dot_env_path:
+        used_dotenv = Path(dot_env_path).expanduser()
+        _load_dotenv_file(used_dotenv)
+    else:
+        auto = _find_dotenv(Path.cwd())
+        if auto is not None:
+            used_dotenv = auto
+            _load_dotenv_file(auto)
 
-            start_service()
-            click.echo("Started via systemd user service.")
-            return
-        except RuntimeError:
-            pass
+    if daemon:
+        if used_dotenv is None:
+            try:
+                from yuuagents.cli.service import start as start_service
+
+                start_service()
+                click.echo("Started via systemd user service.")
+                return
+            except RuntimeError:
+                pass
 
         yagents_bin = shutil.which("yagents")
         if yagents_bin:
