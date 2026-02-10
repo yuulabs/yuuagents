@@ -15,6 +15,59 @@ from yuuagents.persistence import TaskRecorder, ToolCallDTO, ToolErrorDTO, ToolR
 from yuuagents.types import AgentStatus
 
 
+def _trace_llm_gen_items(items: list[Any]) -> list[Any]:
+    out: list[Any] = []
+    text_buf: list[str] = []
+    tool_buf: list[dict[str, Any]] = []
+
+    def flush_text() -> None:
+        if not text_buf:
+            return
+        out.append({"type": "text", "text": "".join(text_buf)})
+        text_buf.clear()
+
+    def flush_tools() -> None:
+        if not tool_buf:
+            return
+        out.append({"type": "tool_calls", "tool_calls": list(tool_buf)})
+        tool_buf.clear()
+
+    for item in items:
+        match item:
+            case yuullm.Response(item=i):
+                flush_tools()
+                if isinstance(i, str):
+                    text_buf.append(i)
+                elif isinstance(i, dict):
+                    flush_text()
+                    out.append(i)
+                else:
+                    flush_text()
+                    out.append({"type": "text", "text": str(i)})
+            case yuullm.ToolCall() as tc:
+                flush_text()
+                if tc.arguments:
+                    try:
+                        args: Any = json.loads(tc.arguments)
+                    except Exception:
+                        args = tc.arguments
+                else:
+                    args = {}
+                tool_buf.append(
+                    {"id": tc.id, "function": tc.name, "arguments": args}
+                )
+            case yuullm.Reasoning():
+                pass
+            case _:
+                flush_tools()
+                flush_text()
+                out.append({"type": "text", "text": str(item)})
+
+    flush_tools()
+    flush_text()
+    return out
+
+
 async def run(
     agent: Agent,
     task: str,
@@ -61,7 +114,7 @@ async def _step(
         items: list[Any] = []
         async for item in stream:
             items.append(item)
-        gen.log(items)
+        gen.log(_trace_llm_gen_items(items))
 
         # Record usage & cost
         usage = store.get("usage")

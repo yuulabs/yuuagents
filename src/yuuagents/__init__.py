@@ -19,6 +19,7 @@ from yuuagents.loop import run as run_agent
 from yuuagents.types import AgentInfo, AgentStatus, SkillInfo, TaskRequest
 
 from yuuagents import tools  # noqa: F401 — yuuagents.tools.execute_bash etc.
+from yuuagents import init  # noqa: F401 — yuuagents.init.setup
 
 __all__ = [
     # from yuutools
@@ -39,4 +40,5 @@ __all__ = [
     "SkillInfo",
     "run_agent",
     "tools",
+    "init",
 ]

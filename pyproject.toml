@@ -11,7 +11,7 @@ dependencies = [
     # Internal
     "yuutools>=0.1.0",
     "yuullm>=0.3.1", #big api change.
-    "yuutrace>=0.1.4", #big api change
+    "yuutrace>=0.1.5", #big api change
     # Data & types
     "attrs>=24.2.0",
     "msgspec>=0.19.0",

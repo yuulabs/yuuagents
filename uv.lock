@@ -1217,7 +1217,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "yuullm", specifier = ">=0.3.1" },
     { name = "yuutools", specifier = ">=0.1.0" },
-    { name = "yuutrace", specifier = ">=0.1.4" },
+    { name = "yuutrace", specifier = ">=0.1.5" },
 ]
 
 [package.metadata.requires-dev]

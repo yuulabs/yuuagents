@@ -150,6 +150,82 @@ pip install -e .
 
 ---
 
+## 两种使用模式
+
+yuuagents 支持两种使用模式，可以混合使用。
+
+### 模式 1：CLI 模式
+
+通过命令行管理 Agent，适合独立部署和运维：
+
+```bash
+# 一次性初始化（创建配置、数据库、构建 Docker 镜像）
+yagents install
+
+# 启动守护进程
+yagents up
+
+# 提交任务
+yagents run --agent coder --task "写一个 Python 函数"
+
+# 查看状态
+yagents list
+yagents status <task-id>
+```
+
+### 模式 2：SDK 模式
+
+通过 Python 代码初始化和使用，适合将 yuuagents 作为库嵌入到其他应用中：
+
+```python
+from __future__ import annotations
+import asyncio
+from yuuagents.init import setup
+from yuuagents.config import Config, load as load_config
+
+async def main():
+    # 方式 A：传入配置文件路径
+    cfg = await setup("/path/to/config.yaml")
+
+    # 方式 B：传入 Config 对象
+    cfg = await setup(load_config("/path/to/config.yaml"))
+
+asyncio.run(main())
+```
+
+`setup()` 等价于 `yagents install` + `yagents up -d`，它会：
+
+1. 创建目录结构（`~/.yagents/`）
+2. 写入配置到 `~/.yagents/config.yaml`
+3. 初始化数据库（建表）
+4. 构建/拉取 Docker 镜像（如果本地不存在）
+5. 启动守护进程（如果尚未运行）
+
+**`setup()` 是幂等的**：重复调用会跳过已完成的步骤。
+
+### 混合使用
+
+SDK 初始化后，CLI 可以直接访问同一套数据（共享配置文件和数据库）：
+
+```python
+# 应用代码（SDK 进程）
+from yuuagents.init import setup
+
+await setup("/path/to/config.yaml")
+
+# 此时 CLI 可以直接使用：
+#   yagents list          — 查看所有任务（包括 SDK 和 CLI 创建的）
+#   yagents status <id>   — 查看任务状态
+#   yagents logs <id>     — 查看对话历史
+#   yagents down          — 停止守护进程
+```
+
+SDK 进程和 daemon 进程各自独立运行 Agent loop，但通过数据库共享任务状态。
+这意味着通过 `yagents run` 下发的任务由 daemon 执行，而 SDK 中直接调用
+`run_agent()` 的任务由 SDK 进程执行，两者互不干扰。
+
+---
+
 ## 示例代码
 
 ### 基础示例：创建自定义工具
