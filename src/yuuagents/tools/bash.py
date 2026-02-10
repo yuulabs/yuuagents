@@ -12,13 +12,18 @@ from yuuagents.context import DockerExecutor
         "command": "The bash command to execute",
         "timeout": "Timeout in seconds (default 120, max 600)",
     },
-    description="Execute a bash command in the Docker container.",
+    description=(
+        "Execute a bash command in the Docker container. Commands run in a persistent "
+        "terminal-like session: working directory and environment variables persist "
+        "across calls."
+    ),
 )
 async def execute_bash(
     command: str,
     timeout: int = 120,
+    session_id: str = yt.depends(lambda ctx: ctx.task_id),
     container: str = yt.depends(lambda ctx: ctx.docker_container),
     docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
 ) -> str:
     timeout = max(1, min(timeout, 600))
-    return await docker.exec(container, command, timeout)
+    return await docker.exec_terminal(container, session_id, command, timeout)

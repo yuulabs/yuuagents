@@ -13,6 +13,13 @@ if TYPE_CHECKING:
 
 class DockerExecutor(Protocol):
     async def exec(self, container_id: str, command: str, timeout: int) -> str: ...
+    async def exec_terminal(
+        self,
+        container_id: str,
+        session_id: str,
+        command: str,
+        timeout: int,
+    ) -> str: ...
 
 
 @define

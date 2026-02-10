@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import difflib
+import re
+
 import pytest
 import yuutools as yt
 
 from yuuagents.tools import BUILTIN_TOOLS, get
 from yuuagents.tools.bash import execute_bash
-from yuuagents.tools.file import delete_file, read_file, write_file
+from yuuagents.tools.file import _write_file_patch, delete_file, read_file, write_file
 from yuuagents.tools.user_input import user_input
 from yuuagents.tools.web import web_search
 
@@ -151,3 +155,150 @@ class TestWebSearchTool:
     def test_is_tool_instance(self) -> None:
         """Should be a Tool instance."""
         assert isinstance(web_search, yt.Tool)
+
+
+class _FakeDocker:
+    def __init__(self, initial: str) -> None:
+        self.content = initial
+
+    async def exec(self, container_id: str, command: str, timeout: int) -> str:
+        m = re.search(
+            r"^printf %s (?P<b64>'[^']*'|[A-Za-z0-9+/=]+) \| base64 -d \| yagents-apply-patch (?P<path>.+)$",
+            command,
+        )
+        if m is not None:
+            b64 = m.group("b64").strip("'")
+            patch_text = base64.b64decode(b64.encode("ascii")).decode("utf-8")
+            before = self.content
+            after = _apply_unified_diff(before, patch_text)
+            self.content = after
+            summary = _diff_summary(
+                path=m.group("path").strip(),
+                before=before,
+                after=after,
+            )
+            return f"{summary}\n__YAGENTS_EXIT_CODE__=0"
+
+        raise AssertionError(f"unexpected command: {command!r}")
+
+
+def _apply_unified_diff(before: str, patch_text: str) -> str:
+    before_lines = before.splitlines(keepends=True)
+    i = 0
+    out: list[str] = []
+
+    lines = patch_text.splitlines(keepends=False)
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if line.startswith("@@ "):
+            m = re.match(
+                r"^@@ -(?P<a>\d+)(?:,(?P<b>\d+))? \+(?P<c>\d+)(?:,(?P<d>\d+))? @@",
+                line,
+            )
+            assert m is not None
+            old_start = int(m.group("a"))
+            out.extend(before_lines[i : old_start - 1])
+            i = old_start - 1
+            idx += 1
+            while idx < len(lines):
+                h = lines[idx]
+                if h.startswith("@@ "):
+                    break
+                if h.startswith("--- ") or h.startswith("+++ "):
+                    idx += 1
+                    continue
+                if not h:
+                    idx += 1
+                    continue
+                tag = h[0]
+                text = h[1:] + "\n"
+                if tag == " ":
+                    assert i < len(before_lines)
+                    assert before_lines[i] == text
+                    out.append(text)
+                    i += 1
+                elif tag == "-":
+                    assert i < len(before_lines)
+                    assert before_lines[i] == text
+                    i += 1
+                elif tag == "+":
+                    out.append(text)
+                else:
+                    raise AssertionError(f"unexpected hunk line: {h!r}")
+                idx += 1
+            continue
+        idx += 1
+    out.extend(before_lines[i:])
+    return "".join(out)
+
+
+def _diff_summary(*, path: str, before: str, after: str) -> str:
+    diff = list(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a{path}",
+            tofile=f"b{path}",
+            lineterm="",
+        )
+    )
+    hunks = sum(1 for line in diff if line.startswith("@@ "))
+    added = sum(
+        1 for line in diff if line.startswith("+") and not line.startswith("+++")
+    )
+    removed = sum(
+        1 for line in diff if line.startswith("-") and not line.startswith("---")
+    )
+    if before == after:
+        return f"{path}\nno-op\nhunks: 0\nlines: +0 -0"
+    return f"{path}\nhunks: {hunks}\nlines: +{added} -{removed}"
+
+
+@pytest.mark.asyncio
+async def test_write_file_applies_patch_and_returns_diff_summary() -> None:
+    docker = _FakeDocker("a\nb\n")
+    patch = "\n".join(
+        [
+            "--- a/x.txt",
+            "+++ b/x.txt",
+            "@@ -1,2 +1,3 @@",
+            " a",
+            "+b2",
+            " b",
+            "",
+        ]
+    )
+    summary = await _write_file_patch(
+        path="/x.txt",
+        patch=patch,
+        container="c1",
+        docker=docker,
+    )
+    assert docker.content == "a\nb2\nb\n"
+    assert "/x.txt" in summary
+    assert "hunks: 1" in summary
+    assert "lines: +1 -0" in summary
+
+
+@pytest.mark.asyncio
+async def test_write_file_noop_patch_returns_noop_summary() -> None:
+    docker = _FakeDocker("a\nb\n")
+    patch = "\n".join(
+        [
+            "--- a/x.txt",
+            "+++ b/x.txt",
+            "@@ -1,2 +1,2 @@",
+            " a",
+            " b",
+            "",
+        ]
+    )
+    summary = await _write_file_patch(
+        path="/x.txt",
+        patch=patch,
+        container="c1",
+        docker=docker,
+    )
+    assert docker.content == "a\nb\n"
+    assert "no-op" in summary

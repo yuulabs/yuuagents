@@ -574,7 +574,9 @@ def _remove_yagents_containers() -> None:
         click.echo("  -> Skipped (Docker not available).")
         return
 
-    lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+    lines = [
+        line.strip() for line in result.stdout.strip().splitlines() if line.strip()
+    ]
     if not lines:
         click.echo("  -> No yagents containers found.")
         return

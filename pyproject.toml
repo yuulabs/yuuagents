@@ -53,3 +53,6 @@ dev = [
 examples = [
     "rich>=13.0.0",
 ]
+
+[tool.mypy]
+python_version = "3.14"

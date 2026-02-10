@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
+import re
+import shlex
+import uuid
 from pathlib import Path
 
 import aiodocker
@@ -36,6 +40,10 @@ class DockerManager:
     _containers: dict[str, str] = field(factory=dict)
     _client: aiodocker.Docker | None = field(default=None, repr=False)
     _start_lock: asyncio.Lock = field(factory=asyncio.Lock, repr=False)
+    _terminal_locks: dict[tuple[str, str], asyncio.Lock] = field(
+        factory=dict, repr=False
+    )
+    _tmux_ready: set[str] = field(factory=set, repr=False)
 
     @property
     def workdir(self) -> str:
@@ -119,61 +127,413 @@ class DockerManager:
 
         await self._ensure_started()
 
-        async def _exec_with_shell(shell: str) -> str:
-            assert self._client is not None
-            container = self._client.containers.container(container_id)
+        # Prefer bash for the default Ubuntu container, but fall back to sh for
+        # minimal images (e.g. alpine) that don't ship bash.
+        result = await self._exec_with_shell(container_id, "bash", command, timeout)
+        if "executable file not found" in result and '"bash"' in result:
+            return await self._exec_with_shell(container_id, "sh", command, timeout)
+        return result
+
+    async def exec_terminal(
+        self,
+        container_id: str,
+        session_id: str,
+        command: str,
+        timeout: int,
+    ) -> str:
+        await self._ensure_started()
+        assert isinstance(session_id, str) and session_id
+
+        session_name = self._terminal_session_name(session_id)
+        key = (container_id, session_name)
+        lock = self._terminal_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._terminal_locks[key] = lock
+
+        async with lock:
+            await self._ensure_tmux(container_id)
+            await self._ensure_tmux_session(container_id, session_name)
+            return await self._exec_tmux_command(
+                container_id=container_id,
+                session_name=session_name,
+                command=command,
+                timeout=timeout,
+            )
+
+    async def _exec_with_shell(
+        self,
+        container_id: str,
+        shell: str,
+        command: str,
+        timeout: int,
+        *,
+        user: str | None = None,
+        workdir: str | None = None,
+        environment: dict[str, str] | None = None,
+    ) -> str:
+        assert self._client is not None
+        container = self._client.containers.container(container_id)
+        if user is None:
             exe = await container.exec(
                 cmd=[shell, "-c", command],
                 stdout=True,
                 stderr=True,
-                workdir=self.workdir,
-                environment={"HOME": self.container_home},
+                workdir=workdir or self.workdir,
+                environment=environment or {"HOME": self.container_home},
+            )
+        else:
+            exe = await container.exec(
+                cmd=[shell, "-c", command],
+                stdout=True,
+                stderr=True,
+                workdir=workdir or self.workdir,
+                environment=environment or {"HOME": self.container_home},
+                user=user,
             )
 
-            # aiodocker 0.25.0: Exec.start() is synchronous and returns a Stream.
-            # Older versions returned an awaitable; support both to keep behavior stable.
-            started = exe.start()
-            if asyncio.iscoroutine(started):  # pragma: no cover
-                stream = await started
-            else:
-                stream = started
+        started = exe.start()
+        if asyncio.iscoroutine(started):  # pragma: no cover
+            stream = await started
+        else:
+            stream = started
 
-            async def _close_stream() -> None:
-                try:
-                    closed = stream.close()  # type: ignore
-                    if asyncio.iscoroutine(closed):
-                        await closed
-                except Exception:
-                    pass
-
-            async def _read_all() -> bytes:
-                chunks: list[bytes] = []
-                try:
-                    while True:
-                        msg = await stream.read_out()  # type:ignore
-                        if msg is None:
-                            break
-                        data = getattr(msg, "data", b"")
-                        if data:
-                            chunks.append(data)
-                finally:
-                    await _close_stream()
-                return b"".join(chunks)
-
+        async def _close_stream() -> None:
             try:
-                output = await asyncio.wait_for(_read_all(), timeout=timeout)
-            except asyncio.TimeoutError:
+                closed = stream.close()  # type: ignore
+                if asyncio.iscoroutine(closed):
+                    await closed
+            except Exception:
+                pass
+
+        async def _read_all() -> bytes:
+            chunks: list[bytes] = []
+            try:
+                while True:
+                    msg = await stream.read_out()  # type:ignore
+                    if msg is None:
+                        break
+                    data = getattr(msg, "data", b"")
+                    if data:
+                        chunks.append(data)
+            finally:
                 await _close_stream()
+            return b"".join(chunks)
+
+        try:
+            output = await asyncio.wait_for(_read_all(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await _close_stream()
+            return f"[ERROR] Command timed out after {timeout}s"
+
+        return output.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _terminal_session_name(session_id: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", session_id).strip("_")
+        safe = safe[:48] if len(safe) > 48 else safe
+        assert safe
+        return f"yag_{safe}"
+
+    @staticmethod
+    def _parse_exit_code_marker(output: str) -> int:
+        lines = output.splitlines()
+        assert lines and lines[-1].startswith("__YAGENTS_EXIT_CODE__=")
+        code_raw = lines[-1].removeprefix("__YAGENTS_EXIT_CODE__=").strip()
+        assert code_raw.isdigit()
+        return int(code_raw)
+
+    async def _ensure_tmux(self, container_id: str) -> None:
+        if container_id in self._tmux_ready:
+            return
+
+        probe = await self._exec_with_shell(
+            container_id,
+            "bash",
+            "command -v tmux >/dev/null 2>&1; echo __YAGENTS_EXIT_CODE__=$?",
+            30,
+        )
+        if self._parse_exit_code_marker(probe) == 0:
+            self._tmux_ready.add(container_id)
+            return
+
+        install = r"""\
+set +e
+command -v apt-get >/dev/null 2>&1
+if [ "$?" -ne 0 ]; then
+  echo "persistent terminal support is unavailable (missing package manager)"
+  echo "__YAGENTS_EXIT_CODE__=2"
+  exit 0
+fi
+apt-get update -y >/dev/null 2>&1
+apt-get install -y --no-install-recommends tmux >/dev/null 2>&1
+if [ "$?" -ne 0 ]; then
+  echo "failed to install persistent terminal support"
+  echo "__YAGENTS_EXIT_CODE__=1"
+  exit 0
+fi
+echo "__YAGENTS_EXIT_CODE__=0"
+exit 0
+"""
+        out = await self._exec_with_shell(
+            container_id,
+            "bash",
+            install,
+            180,
+            user="0:0",
+            workdir="/",
+            environment={
+                "HOME": "/root",
+                "DEBIAN_FRONTEND": "noninteractive",
+            },
+        )
+        assert self._parse_exit_code_marker(out) == 0, out
+        self._tmux_ready.add(container_id)
+
+    async def _ensure_tmux_session(self, container_id: str, session_name: str) -> None:
+        q = shlex.quote(session_name)
+        probe = await self._exec_with_shell(
+            container_id,
+            "bash",
+            f"tmux has-session -t {q} >/dev/null 2>&1; echo __YAGENTS_EXIT_CODE__=$?",
+            30,
+        )
+        if self._parse_exit_code_marker(probe) == 0:
+            return
+
+        create = (
+            f"tmux new-session -d -s {q} -c {shlex.quote(self.workdir)} bash"
+            f" >/dev/null 2>&1; echo __YAGENTS_EXIT_CODE__=$?"
+        )
+        out = await self._exec_with_shell(container_id, "bash", create, 30)
+        if self._parse_exit_code_marker(out) == 0:
+            return
+
+        create = (
+            f"tmux new-session -d -s {q} -c {shlex.quote(self.workdir)} sh"
+            f" >/dev/null 2>&1; echo __YAGENTS_EXIT_CODE__=$?"
+        )
+        out = await self._exec_with_shell(container_id, "bash", create, 30)
+        assert self._parse_exit_code_marker(out) == 0, out
+
+    async def _exec_tmux_command(
+        self,
+        *,
+        container_id: str,
+        session_name: str,
+        command: str,
+        timeout: int,
+    ) -> str:
+        token = uuid.uuid4().hex
+        cmd_b64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
+        begin = f"__YAGENTS_BEGIN__={token}"
+        end_prefix = f"__YAGENTS_END__={token}"
+
+        payload = (
+            f"printf '\\n{begin}\\n'; "
+            f"__y_cmd=$(printf %s {cmd_b64} | base64 -d); "
+            f"eval \"$__y_cmd\"; __y_code=$?; "
+            f"printf '\\n{end_prefix} __YAGENTS_EXIT_CODE__=%s\\n' \"$__y_code\""
+        )
+
+        q_sess = shlex.quote(session_name)
+        send = (
+            f"tmux send-keys -t {q_sess} -l {shlex.quote(payload)};"
+            f" tmux send-keys -t {q_sess} C-m"
+        )
+        await self._exec_with_shell(container_id, "bash", send, 30)
+
+        deadline = asyncio.get_running_loop().time() + max(1, timeout)
+        last_capture = ""
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
                 return f"[ERROR] Command timed out after {timeout}s"
 
-            return output.decode("utf-8", errors="replace")
+            cap = await self._exec_with_shell(
+                container_id,
+                "bash",
+                f"tmux capture-pane -p -t {q_sess} -S -2000",
+                int(min(10, max(1, remaining))),
+            )
+            last_capture = cap
+            if end_prefix in cap:
+                break
+            await asyncio.sleep(0.1)
 
-        # Prefer bash for the default Ubuntu container, but fall back to sh for
-        # minimal images (e.g. alpine) that don't ship bash.
-        result = await _exec_with_shell("bash")
-        if "executable file not found" in result and '"bash"' in result:
-            return await _exec_with_shell("sh")
-        return result
+        lines = last_capture.splitlines()
+        begin_idx = -1
+        end_idx = -1
+        for i, line in enumerate(lines):
+            if line.strip() == begin:
+                begin_idx = i
+            if line.strip().startswith(end_prefix):
+                end_idx = i
+
+        assert begin_idx != -1 and end_idx != -1 and end_idx >= begin_idx, last_capture
+
+        end_line = lines[end_idx].strip()
+        code = 0
+        if "__YAGENTS_EXIT_CODE__=" in end_line:
+            code_raw = end_line.split("__YAGENTS_EXIT_CODE__=", 1)[1].strip()
+            if code_raw.isdigit():
+                code = int(code_raw)
+
+        body = "\n".join(lines[begin_idx + 1 : end_idx]).strip()
+        if code != 0:
+            return f"{body}\n[exit code: {code}]".strip()
+        return body
+
+    async def _ensure_default_tooling(self, container_id: str) -> None:
+        command = r"""\
+set +e
+
+need_install=0
+command -v patch >/dev/null 2>&1 || need_install=1
+command -v diff >/dev/null 2>&1 || need_install=1
+command -v tmux >/dev/null 2>&1 || need_install=1
+
+if [ "$need_install" -eq 1 ]; then
+  command -v apt-get >/dev/null 2>&1
+  if [ "$?" -ne 0 ]; then
+    echo "missing required tools and no apt-get available"
+    echo "__YAGENTS_EXIT_CODE__=2"
+    exit 0
+  fi
+  apt-get update -y >/dev/null 2>&1
+  apt-get install -y --no-install-recommends patch diffutils tmux ca-certificates >/dev/null 2>&1
+  if [ "$?" -ne 0 ]; then
+    echo "failed to install required tools"
+    echo "__YAGENTS_EXIT_CODE__=1"
+    exit 0
+  fi
+fi
+
+if [ ! -x /usr/local/bin/yagents-apply-patch ]; then
+  cat > /usr/local/bin/yagents-apply-patch <<'EOF'
+#!/usr/bin/env bash
+set +e
+
+target="$1"
+if [ -z "$target" ]; then
+  echo "missing target path"
+  echo "__YAGENTS_EXIT_CODE__=2"
+  exit 0
+fi
+case "$target" in
+  /*) ;;
+  *)
+    echo "target path must be absolute: $target"
+    echo "__YAGENTS_EXIT_CODE__=2"
+    exit 0
+    ;;
+esac
+
+before="$(mktemp)"
+after="$(mktemp)"
+patch_raw="$(mktemp)"
+patch_rewritten="$(mktemp)"
+
+cleanup() {
+  rm -f "$before" "$after" "$patch_raw" "$patch_rewritten"
+}
+trap cleanup EXIT
+
+mkdir -p "$(dirname "$target")"
+
+if [ -f "$target" ]; then
+  cat "$target" > "$before"
+else
+  : > "$before"
+fi
+
+cat > "$patch_raw"
+if [ "$?" -ne 0 ]; then
+  echo "failed to read patch"
+  echo "__YAGENTS_EXIT_CODE__=3"
+  exit 0
+fi
+
+awk -v tgt="$target" '
+BEGIN { done_old=0; done_new=0 }
+{
+  if (!done_old && $0 ~ /^--- /) { print "--- " tgt; done_old=1; next }
+  if (!done_new && $0 ~ /^\+\+\+ /) { print "+++ " tgt; done_new=1; next }
+  print $0
+}
+' "$patch_raw" > "$patch_rewritten"
+
+patch -p0 -u -N --silent < "$patch_rewritten"
+code=$?
+if [ "$code" -ne 0 ]; then
+  echo "patch failed (exit=$code)"
+  echo "__YAGENTS_EXIT_CODE__=$code"
+  exit 0
+fi
+
+if [ -f "$target" ]; then
+  cat "$target" > "$after"
+else
+  : > "$after"
+fi
+
+if cmp -s "$before" "$after"; then
+  echo "$target"
+  echo "no-op"
+  echo "hunks: 0"
+  echo "lines: +0 -0"
+  echo "__YAGENTS_EXIT_CODE__=0"
+  exit 0
+fi
+
+read hunks added removed <<EOF2
+$(diff -u "$before" "$after" | awk '
+BEGIN { h=0; a=0; r=0 }
+/^@@ / { h++ }
+/^\+\+\+ / { next }
+/^--- / { next }
+/^\+/ { a++; next }
+/^-/ { r++; next }
+END { printf "%d %d %d\n", h, a, r }
+')
+EOF2
+
+echo "$target"
+echo "hunks: $hunks"
+echo "lines: +$added -$removed"
+echo "__YAGENTS_EXIT_CODE__=0"
+exit 0
+EOF
+  chmod +x /usr/local/bin/yagents-apply-patch >/dev/null 2>&1
+  if [ "$?" -ne 0 ]; then
+    echo "failed to install /usr/local/bin/yagents-apply-patch"
+    echo "__YAGENTS_EXIT_CODE__=1"
+    exit 0
+  fi
+fi
+
+echo "__YAGENTS_EXIT_CODE__=0"
+exit 0
+"""
+
+        output = await self._exec_with_shell(
+            container_id,
+            "bash",
+            command,
+            180,
+            user="0:0",
+            workdir="/",
+            environment={
+                "HOME": "/root",
+                "DEBIAN_FRONTEND": "noninteractive",
+            },
+        )
+        lines = output.splitlines()
+        assert lines and lines[-1].startswith("__YAGENTS_EXIT_CODE__=")
+        code_raw = lines[-1].removeprefix("__YAGENTS_EXIT_CODE__=").strip()
+        assert code_raw.isdigit()
+        assert int(code_raw) == 0, output
+        self._tmux_ready.add(container_id)
 
     async def cleanup(self, task_id: str) -> None:
         """Remove a per-task container (if we created one)."""
@@ -193,14 +553,20 @@ class DockerManager:
             container = self._client.containers.container(name)
             info = await container.show()
             if info["State"]["Running"]:
-                return info["Id"]
+                cid = info["Id"]
+                await self._ensure_default_tooling(cid)
+                return cid
             await container.start()
             info = await container.show()
-            return info["Id"]
+            cid = info["Id"]
+            await self._ensure_default_tooling(cid)
+            return cid
         except Exception:
             pass
 
-        return await self._create(image=self.image, name=name)
+        cid = await self._create(image=self.image, name=name)
+        await self._ensure_default_tooling(cid)
+        return cid
 
     async def _create(
         self,

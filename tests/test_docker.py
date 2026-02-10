@@ -196,6 +196,29 @@ class TestDockerManagerExec:
 
 
 @pytest.mark.asyncio
+class TestDockerManagerTerminalSession:
+    """Tests for terminal session behavior — requires Docker."""
+
+    async def test_exec_terminal_persists_workdir(
+        self, started_docker_manager: DockerManager
+    ) -> None:
+        manager = started_docker_manager
+        container_id = manager.default_container_id
+        session_id = uuid.uuid4().hex
+
+        result = await manager.exec_terminal(container_id, session_id, "pwd", timeout=60)
+        assert "/home/yuu" in result
+
+        result = await manager.exec_terminal(
+            container_id, session_id, "cd / && pwd", timeout=60
+        )
+        assert result.strip().endswith("/")
+
+        result = await manager.exec_terminal(container_id, session_id, "pwd", timeout=60)
+        assert result.strip().endswith("/")
+
+
+@pytest.mark.asyncio
 class TestDockerManagerCleanup:
     """Tests for cleanup() method — requires Docker."""
 
