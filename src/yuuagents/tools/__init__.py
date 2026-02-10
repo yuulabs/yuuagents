@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from yuuagents.tools.bash import execute_bash
 from yuuagents.tools.file import delete_file, read_file, write_file
+from yuuagents.tools.user_input import user_input
 from yuuagents.tools.web import web_search
 
 BUILTIN_TOOLS = {
@@ -11,6 +12,7 @@ BUILTIN_TOOLS = {
     "read_file": read_file,
     "write_file": write_file,
     "delete_file": delete_file,
+    "user_input": user_input,
     "web_search": web_search,
 }
 

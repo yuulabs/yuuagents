@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from attrs import define, field
+
+if TYPE_CHECKING:
+    from yuuagents.agent import AgentState
 
 
 class DockerExecutor(Protocol):
@@ -24,5 +27,6 @@ class AgentContext:
     workdir: str
     docker_container: str
     docker: DockerExecutor | None = None
+    state: AgentState | None = None
     input_queue: asyncio.Queue[str] = field(factory=asyncio.Queue)
     tavily_api_key: str = ""

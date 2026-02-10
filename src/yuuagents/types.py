@@ -60,6 +60,7 @@ class AgentInfo(msgspec.Struct, frozen=True, kw_only=True):
     status: str
     created_at: str
     last_assistant_message: str = ""
+    pending_input_prompt: str = ""
     steps: int = 0
     total_tokens: int = 0
     total_cost_usd: float = 0.0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -286,6 +287,41 @@ class TaskPersistence:
 
         return history
 
+    async def pending_input_prompt(self, task_id: str) -> str | None:
+        row = await self.get_task_row(task_id)
+        if row is None:
+            raise KeyError(task_id)
+        if row.status != AgentStatus.BLOCKED_ON_INPUT.value:
+            return None
+        if row.head_turn <= 0:
+            return None
+
+        turn = row.head_turn
+        async with self._session()() as session:
+            llm_cp = (
+                await session.execute(
+                    select(TaskCheckpointRow)
+                    .where(
+                        (TaskCheckpointRow.task_id == task_id)
+                        & (TaskCheckpointRow.turn == turn)
+                        & (TaskCheckpointRow.phase == "llm")
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
+        if llm_cp is None:
+            return None
+
+        llm_payload = msgspec.json.decode(llm_cp.payload, type=LlmCheckpointPayload)
+        for c in llm_payload.tool_calls:
+            if c.name != "user_input":
+                continue
+            args = json.loads(c.args_json) if c.args_json else {}
+            prompt = str(args.get("prompt", "")).strip()
+            return prompt or None
+        return None
+
     async def load_unfinished(self) -> list[RestoredTask]:
         async with self._session()() as session:
             rows = (
@@ -501,16 +537,7 @@ class TaskWriter:
                         await session.execute(
                             update(TaskRow)
                             .where(
-                                (TaskRow.task_id == task_id)
-                                & (
-                                    TaskRow.status.notin_(
-                                        [
-                                            AgentStatus.DONE.value,
-                                            AgentStatus.ERROR.value,
-                                            AgentStatus.CANCELLED.value,
-                                        ]
-                                    )
-                                )
+                                TaskRow.task_id == task_id
                             )
                             .values(status=status)
                         )
@@ -570,6 +597,27 @@ class TaskRecorder:
             ts=datetime.now(timezone.utc),
             payload=msgspec.json.encode(payload),
             status_after=status_after,
+        )
+        await self.writer.append_checkpoint(cp)
+
+    async def record_user(
+        self,
+        *,
+        turn: int,
+        message: Any,
+    ) -> None:
+        payload = LlmCheckpointPayload(
+            history_append=message,
+            tool_calls=[],
+            status_after=AgentStatus.RUNNING.value,
+        )
+        cp = _BufferedCheckpoint(
+            task_id=self.task_id,
+            turn=turn,
+            phase="llm",
+            ts=datetime.now(timezone.utc),
+            payload=msgspec.json.encode(payload),
+            status_after=AgentStatus.RUNNING,
         )
         await self.writer.append_checkpoint(cp)
 

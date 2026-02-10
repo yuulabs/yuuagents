@@ -109,13 +109,20 @@ class Config(msgspec.Struct, kw_only=True):
 
     @property
     def db_url(self) -> str:
-        url = self.db.url
+        sp = self.sqlite_path
+        if sp is not None:
+            return "sqlite+aiosqlite:///" + str(sp)
+        return self.db.url
+
+    @property
+    def sqlite_path(self) -> Path | None:
+        """Return the resolved SQLite file :class:`Path`, or ``None`` if the
+        database URL does not point to a local SQLite file."""
         prefix = "sqlite+aiosqlite:///"
-        if url.startswith(prefix):
-            path = url[len(prefix) :]
-            if path.startswith("~"):
-                return prefix + str(Path(path).expanduser())
-        return url
+        if not self.db.url.startswith(prefix):
+            return None
+        raw = self.db.url[len(prefix) :]
+        return Path(raw).expanduser().resolve()
 
     def validate(self) -> list[str]:
         """Check referential integrity.  Returns a list of error messages."""

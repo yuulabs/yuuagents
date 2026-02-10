@@ -58,6 +58,7 @@ class AgentState:
     history: list[yuullm.Message] = field(factory=list)
     status: AgentStatus = AgentStatus.IDLE
     error: ErrorInfo | None = None
+    pending_input_prompt: str = ""
     steps: int = 0
     total_tokens: int = 0
     total_cost_usd: float = 0.0

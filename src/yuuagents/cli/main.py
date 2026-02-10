@@ -17,6 +17,7 @@ import yaml
 from yuuagents.config import (
     DEFAULT_CONFIG_PATH,
     YAGENTS_HOME,
+    Config,
     _PROJECT_CONFIG_NAME,
     _PROJECT_OVERRIDES_NAME,
     _deep_merge,
@@ -28,8 +29,26 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from yuuagents.cli.client import YAgentsClient
 
+from yuuagents.cli.client import DaemonNotRunningError
+
 
 _DOTENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Local config file names (looked up in cwd only).
+_LOCAL_CONFIG_NAME = "config.yaml"
+_LOCAL_OVERRIDES_NAME = "config.overrides.yaml"
+
+
+def _local_config() -> Path | None:
+    """Return ``cwd/config.yaml`` if it exists, else ``None``."""
+    p = Path.cwd() / _LOCAL_CONFIG_NAME
+    return p if p.is_file() else None
+
+
+def _local_overrides() -> Path | None:
+    """Return ``cwd/config.overrides.yaml`` if it exists, else ``None``."""
+    p = Path.cwd() / _LOCAL_OVERRIDES_NAME
+    return p if p.is_file() else None
 
 
 def _find_dotenv(start_dir: Path) -> Path | None:
@@ -128,7 +147,7 @@ def install(
     project_dir: str | None,
     systemd: bool,
 ) -> None:
-    """One-time install: install config, create directories, pull Docker.
+    """One-time install: install config, create directories, init database, pull Docker.
 
     \b
     Config resolution order:
@@ -140,13 +159,13 @@ def install(
     This command will:
       1. Write merged config to ~/.yagents/config.yaml.
       2. Create required directories (~/.yagents/skills, ~/.yagents/dockers, db parent).
-      3. Install Docker if needed (prompts for sudo).
+      3. Initialize the database (create tables).
       4. Pull the Docker image specified in the config.
 
     If ``--systemd`` is provided, it will also:
       5. Register yagents as a systemd user service.
     """
-    total_steps = 4 if systemd else 3
+    total_steps = 5 if systemd else 4
     # -- Step 0: resolve config sources --
     if config_path:
         # User provided a full config — requires confirmation
@@ -168,45 +187,72 @@ def install(
 
         merged_data = user_data
     else:
-        # Auto-detect project root for config.example.yaml
-        root: Path | None
-        if project_dir:
-            root = Path(project_dir)
+        # --- Try cwd first: config.yaml / config.overrides.yaml ---
+        local_cfg = _local_config()
+        local_over = _local_overrides()
+
+        if local_cfg is not None:
+            click.echo(f"Found local:   {local_cfg}")
+            base_data = yaml.safe_load(local_cfg.read_text(encoding="utf-8")) or {}
+
+            if local_over is not None:
+                click.echo(f"Found local:   {local_over}")
+                over_data = yaml.safe_load(local_over.read_text(encoding="utf-8")) or {}
+                base_data = _deep_merge(base_data, over_data)
+
+            # Apply CLI --overrides on top
+            if overrides_path:
+                over_p = Path(overrides_path)
+                over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+                base_data = _deep_merge(base_data, over_data)
+                click.echo(f"CLI overrides: {overrides_path}")
+
+            merged_data = base_data
         else:
-            root = find_project_root()
+            # Fallback: auto-detect project root for config.example.yaml
+            root: Path | None
+            if project_dir:
+                root = Path(project_dir)
+            else:
+                root = find_project_root()
 
-        if root is None or not (root / _PROJECT_CONFIG_NAME).exists():
-            click.echo(
-                f"Error: cannot find {_PROJECT_CONFIG_NAME}. "
-                "Run this command from the project directory or pass --project-dir.",
-                err=True,
-            )
-            sys.exit(1)
-        assert root is not None
+            if root is None or not (root / _PROJECT_CONFIG_NAME).exists():
+                click.echo(
+                    f"Error: cannot find {_LOCAL_CONFIG_NAME} in current directory "
+                    f"or {_PROJECT_CONFIG_NAME} in project root. "
+                    "Run this command from the project directory or pass --project-dir.",
+                    err=True,
+                )
+                sys.exit(1)
+            assert root is not None
 
-        base_path = root / _PROJECT_CONFIG_NAME
-        click.echo(f"Project root:  {root}")
-        click.echo(f"Base config:   {base_path}")
+            base_path = root / _PROJECT_CONFIG_NAME
+            click.echo(f"Project root:  {root}")
+            click.echo(f"Base config:   {base_path}")
 
-        base_data = yaml.safe_load(base_path.read_text(encoding="utf-8")) or {}
+            base_data = yaml.safe_load(base_path.read_text(encoding="utf-8")) or {}
 
-        # Check for project-level overrides
-        proj_overrides = root / _PROJECT_OVERRIDES_NAME
-        if proj_overrides.exists():
-            over_data = yaml.safe_load(proj_overrides.read_text(encoding="utf-8")) or {}
-            base_data = _deep_merge(base_data, over_data)
-            click.echo(f"Overrides:     {proj_overrides}")
-        else:
-            click.echo(f"Overrides:     (none — {_PROJECT_OVERRIDES_NAME} not found)")
+            # Check for project-level overrides
+            proj_overrides = root / _PROJECT_OVERRIDES_NAME
+            if proj_overrides.exists():
+                over_data = (
+                    yaml.safe_load(proj_overrides.read_text(encoding="utf-8")) or {}
+                )
+                base_data = _deep_merge(base_data, over_data)
+                click.echo(f"Overrides:     {proj_overrides}")
+            else:
+                click.echo(
+                    f"Overrides:     (none — {_PROJECT_OVERRIDES_NAME} not found)"
+                )
 
-        # Apply CLI --overrides on top
-        if overrides_path:
-            over_p = Path(overrides_path)
-            over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
-            base_data = _deep_merge(base_data, over_data)
-            click.echo(f"CLI overrides: {overrides_path}")
+            # Apply CLI --overrides on top
+            if overrides_path:
+                over_p = Path(overrides_path)
+                over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+                base_data = _deep_merge(base_data, over_data)
+                click.echo(f"CLI overrides: {overrides_path}")
 
-        merged_data = base_data
+            merged_data = base_data
 
     # -- Step 1: write config --
     click.echo()
@@ -240,19 +286,24 @@ def install(
     for sp in cfg.skills.paths:
         dirs_to_create.append(Path(sp).expanduser())
 
-    db_url = cfg.db_url
-    sqlite_prefix = "sqlite+aiosqlite:///"
-    if db_url.startswith(sqlite_prefix):
-        db_path = Path(db_url[len(sqlite_prefix) :])
+    db_path = cfg.sqlite_path
+    if db_path is not None:
         dirs_to_create.append(db_path.parent)
 
     for d in dirs_to_create:
         d.mkdir(parents=True, exist_ok=True)
         click.echo(f"  -> {d}")
 
-    # -- Step 3: Docker --
+    # -- Step 3: initialize database --
     click.echo()
-    click.echo(f"[3/{total_steps}] Setting up Docker ...")
+    click.echo(f"[3/{total_steps}] Initializing database ...")
+    click.echo(f"  URL: {cfg.db_url}")
+    _init_database(cfg.db_url)
+    click.echo("  -> Database tables created.")
+
+    # -- Step 4: Docker --
+    click.echo()
+    click.echo(f"[4/{total_steps}] Setting up Docker ...")
 
     image = cfg.docker.image
     click.echo(f"  Image: {image}")
@@ -291,7 +342,7 @@ def install(
 
     if systemd:
         click.echo()
-        click.echo(f"[4/{total_steps}] Registering systemd user service ...")
+        click.echo(f"[5/{total_steps}] Registering systemd user service ...")
 
         try:
             from yuuagents.cli.service import install as install_service
@@ -330,37 +381,214 @@ def install(
         )
 
 
+def _init_database(db_url: str) -> None:
+    """Create database tables (idempotent).
+
+    Uses :class:`TaskPersistence` to run ``CREATE TABLE IF NOT EXISTS``
+    via SQLAlchemy's ``metadata.create_all``.
+    """
+    from yuuagents.persistence import TaskPersistence
+
+    async def _run() -> None:
+        p = TaskPersistence(db_url=db_url)
+        await p.start()
+        await p.stop()
+
+    asyncio.run(_run())
+
+
+def _check_db_path_unchanged(new_cfg: Config) -> None:
+    """Abort if the database path in *new_cfg* differs from the installed config.
+
+    When the user changes ``db.url`` to point to a different file, the old
+    database is silently orphaned on disk.  To prevent this kind of disk
+    leak we refuse to start and ask the user to ``uninstall`` + ``install``
+    so that the old data is cleaned up first.
+    """
+    if not DEFAULT_CONFIG_PATH.exists():
+        # No installed config yet — nothing to compare against.
+        return
+
+    installed_cfg = load_config()  # loads from DEFAULT_CONFIG_PATH
+    old_path = installed_cfg.sqlite_path
+    new_path = new_cfg.sqlite_path
+
+    # Both non-SQLite (or identical) — fine.
+    if old_path == new_path:
+        return
+
+    # One is SQLite and the other is not, or they point to different files.
+    click.echo(
+        "ERROR: Database path has changed since last install.\n"
+        f"  Installed: {installed_cfg.db.url}\n"
+        f"  Requested: {new_cfg.db.url}\n"
+        "\n"
+        "Starting with a different database path would orphan the old\n"
+        "database file on disk.  To switch database paths safely:\n"
+        "\n"
+        "  1. yagents uninstall   (removes old data)\n"
+        "  2. yagents install     (with the new config)\n"
+        "  3. yagents up\n",
+        err=True,
+    )
+    sys.exit(1)
+
+
 @cli.command()
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation prompt",
+)
 @click.pass_context
-def uninstall(ctx: click.Context) -> None:
-    """Uninstall yagents: stop daemon, unregister systemd service, remove config."""
-    click.echo("Stopping daemon ...")
+def uninstall(ctx: click.Context, yes: bool) -> None:
+    """Uninstall yagents: stop daemon, remove ALL persistent data.
+
+    \b
+    This command will:
+      1. Stop the running daemon.
+      2. Unregister the systemd user service.
+      3. Stop and remove all yagents Docker containers.
+      4. Remove the SQLite database file.
+      5. Remove the entire ~/.yagents directory (config, skills, dockers, socket).
+
+    After uninstall, the system is as if yagents was never installed.
+    """
+    # -- Collect what will be removed so we can show the user --
+    cfg: Config | None = None
+    try:
+        cfg = load_config()
+    except Exception:
+        pass
+
+    items_to_remove: list[str] = []
+    db_path: Path | None = None
+    if cfg is not None:
+        db_path = cfg.sqlite_path
+        if db_path is not None and db_path.exists():
+            # If the db lives outside YAGENTS_HOME, list it explicitly
+            try:
+                db_path.relative_to(YAGENTS_HOME)
+            except ValueError:
+                items_to_remove.append(f"Database:       {db_path}")
+    if YAGENTS_HOME.exists():
+        items_to_remove.append(f"Data directory: {YAGENTS_HOME}/")
+
+    if not items_to_remove:
+        click.echo("Nothing to uninstall (no data found).")
+        return
+
+    click.echo("The following will be PERMANENTLY deleted:")
+    for item in items_to_remove:
+        click.echo(f"  {item}")
+    click.echo()
+
+    if not yes:
+        if not click.confirm("Are you sure you want to proceed?"):
+            click.echo("Aborted.")
+            return
+
+    total_steps = 5
+    # -- Step 1: stop daemon --
+    click.echo()
+    click.echo(f"[1/{total_steps}] Stopping daemon ...")
     c = _client(ctx)
     try:
         c.health()
         c.shutdown()
         click.echo("  -> Shutdown requested.")
+    except DaemonNotRunningError:
+        click.echo("  -> Daemon is not running.")
     except Exception:
         click.echo("  -> Daemon is not running.")
     finally:
         c.close()
 
-    click.echo("Unregistering systemd user service ...")
+    # -- Step 2: unregister systemd service --
+    click.echo()
+    click.echo(f"[2/{total_steps}] Unregistering systemd user service ...")
     try:
         from yuuagents.cli.service import uninstall as uninstall_service
 
         uninstall_service()
         click.echo("  -> Service unregistered.")
     except RuntimeError as e:
-        click.echo(f"  WARNING: {e}", err=True)
+        click.echo(f"  -> Skipped: {e}", err=True)
 
-    if DEFAULT_CONFIG_PATH.exists():
-        DEFAULT_CONFIG_PATH.unlink()
-        click.echo(f"Removed config: {DEFAULT_CONFIG_PATH}")
+    # -- Step 3: stop & remove yagents Docker containers --
+    click.echo()
+    click.echo(f"[3/{total_steps}] Removing yagents Docker containers ...")
+    _remove_yagents_containers()
+
+    # -- Step 4: remove database (if outside YAGENTS_HOME) --
+    click.echo()
+    click.echo(f"[4/{total_steps}] Removing database ...")
+    if db_path is not None and db_path.exists():
+        try:
+            db_path.relative_to(YAGENTS_HOME)
+            click.echo(f"  -> {db_path} (will be removed with data directory)")
+        except ValueError:
+            db_path.unlink()
+            click.echo(f"  -> Removed {db_path}")
     else:
-        click.echo(f"Config not found: {DEFAULT_CONFIG_PATH}")
+        click.echo("  -> No database file found.")
 
-    click.echo("Uninstall complete.")
+    # -- Step 5: remove ~/.yagents entirely --
+    click.echo()
+    click.echo(f"[5/{total_steps}] Removing data directory ...")
+    if YAGENTS_HOME.exists():
+        shutil.rmtree(YAGENTS_HOME)
+        click.echo(f"  -> Removed {YAGENTS_HOME}/")
+    else:
+        click.echo(f"  -> {YAGENTS_HOME}/ does not exist.")
+
+    click.echo()
+    click.echo("Uninstall complete. All yagents data has been removed.")
+
+
+def _remove_yagents_containers() -> None:
+    """Stop and remove all Docker containers whose name starts with ``yagents-``."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                "name=^yagents-",
+                "--format",
+                "{{.ID}} {{.Names}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            click.echo("  -> WARNING: could not list Docker containers.", err=True)
+            return
+    except FileNotFoundError, subprocess.TimeoutExpired:
+        click.echo("  -> Skipped (Docker not available).")
+        return
+
+    lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+    if not lines:
+        click.echo("  -> No yagents containers found.")
+        return
+
+    for line in lines:
+        parts = line.split(None, 1)
+        cid = parts[0]
+        name = parts[1] if len(parts) > 1 else cid[:12]
+        subprocess.run(
+            ["docker", "rm", "-f", cid],
+            capture_output=True,
+            timeout=15,
+        )
+        click.echo(f"  -> Removed container {name} ({cid[:12]})")
 
 
 def _docker_available() -> bool:
@@ -378,7 +606,7 @@ def _image_exists(image: str) -> bool:
             timeout=10,
         )
         return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError, subprocess.TimeoutExpired:
         return False
 
 
@@ -405,7 +633,10 @@ def _docker_check() -> tuple[bool, str]:
         )
     except subprocess.TimeoutExpired:
         v = (version.stdout or version.stderr or "").strip()
-        return False, f"{v or 'docker'}; docker daemon check timed out after {timeout_s}s"
+        return (
+            False,
+            f"{v or 'docker'}; docker daemon check timed out after {timeout_s}s",
+        )
 
     if server.returncode == 0:
         return True, ""
@@ -413,12 +644,17 @@ def _docker_check() -> tuple[bool, str]:
     v = (version.stdout or version.stderr or "docker").strip()
     raw = (server.stderr or server.stdout or "").strip()
     first_line = (
-        raw.splitlines()[0].strip() if raw else f"docker version exited {server.returncode}"
+        raw.splitlines()[0].strip()
+        if raw
+        else f"docker version exited {server.returncode}"
     )
     lower = raw.lower()
     if "permission denied" in lower:
         return False, f"{v}; permission denied connecting to daemon ({first_line})"
-    if "cannot connect to the docker daemon" in lower or "is the docker daemon running" in lower:
+    if (
+        "cannot connect to the docker daemon" in lower
+        or "is the docker daemon running" in lower
+    ):
         return False, f"{v}; daemon not reachable ({first_line})"
     if "context" in lower and "not found" in lower:
         return False, f"{v}; docker context error ({first_line})"
@@ -586,6 +822,12 @@ def config(
             click.echo("  -> Daemon configuration reloaded successfully")
         else:
             click.echo(f"  WARNING: {result.get('error', 'Unknown error')}", err=True)
+    except DaemonNotRunningError:
+        click.echo(
+            "  WARNING: Daemon is not running. "
+            "The config file has been updated; changes will take effect on next start.",
+            err=True,
+        )
     except Exception as e:
         click.echo(
             f"  WARNING: Could not reload daemon (is it running?): {e}", err=True
@@ -621,7 +863,18 @@ def up(
     daemon: bool,
     dot_env_path: str | None,
 ) -> None:
-    """Start the yagents daemon."""
+    """Start the yagents daemon.
+
+    Before starting, the resolved configuration is compared against the
+    installed config (``~/.yagents/config.yaml``).  If the database path
+    has changed, the command refuses to start and asks the user to run
+    ``yagents uninstall`` + ``yagents install`` instead.  This prevents
+    orphaned database files from leaking on disk.
+
+    The installed config file is then updated with the latest resolved
+    configuration so that subsequent ``up`` invocations pick up non-db
+    changes automatically.
+    """
     used_dotenv: Path | None = None
     if dot_env_path:
         used_dotenv = Path(dot_env_path).expanduser()
@@ -663,8 +916,43 @@ def up(
         return
 
     from yuuagents.daemon.server import serve
+    import msgspec
 
-    cfg = load_config(config_path)
+    # -- Resolve the "new" config that the user wants to run with --
+    if config_path:
+        cfg = load_config(config_path)
+    else:
+        local_cfg = _local_config()
+        local_over = _local_overrides()
+
+        if local_cfg is not None:
+            click.echo(f"Found local:   {local_cfg}")
+            base_data = yaml.safe_load(local_cfg.read_text(encoding="utf-8")) or {}
+        elif DEFAULT_CONFIG_PATH.exists():
+            base_data = (
+                yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+            )
+        else:
+            base_data = {}
+
+        if local_over is not None:
+            click.echo(f"Found local:   {local_over}")
+            over_data = yaml.safe_load(local_over.read_text(encoding="utf-8")) or {}
+            base_data = _deep_merge(base_data, over_data)
+
+        cfg = msgspec.convert(base_data, Config)
+
+    # -- Guard: detect database path change --
+    _check_db_path_unchanged(cfg)
+
+    # -- Persist the latest config so it becomes the new "installed" baseline --
+    if DEFAULT_CONFIG_PATH.exists():
+        new_data = json.loads(msgspec.json.encode(cfg))
+        DEFAULT_CONFIG_PATH.write_text(
+            yaml.dump(new_data, default_flow_style=False, allow_unicode=True),
+            encoding="utf-8",
+        )
+
     click.echo(f"Starting daemon on {cfg.socket_path} ...")
     asyncio.run(serve(cfg))
 
@@ -685,6 +973,8 @@ def down(ctx: click.Context) -> None:
         c.health()
         c.shutdown()
         click.echo("Shutdown requested.")
+    except DaemonNotRunningError:
+        click.echo("Daemon is not running.")
     except Exception:
         click.echo("Daemon is not running.")
     finally:
@@ -700,6 +990,9 @@ def stop(ctx: click.Context, task_id: str) -> None:
     try:
         c.cancel(task_id)
         click.echo(f"Task {task_id} cancelled.")
+    except DaemonNotRunningError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -759,6 +1052,9 @@ def run(
     try:
         result = c.submit(payload)
         click.echo(f"Task started: {result['task_id']}  agent={result['agent_id']}")
+    except DaemonNotRunningError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -786,6 +1082,9 @@ def list_agents(ctx: click.Context) -> None:
             click.echo(
                 f"  [{status:>8}] {tid}  agent={aid}  steps={steps}  ${cost:.4f}  {task}"
             )
+    except DaemonNotRunningError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     finally:
         c.close()
 
@@ -799,6 +1098,9 @@ def status(ctx: click.Context, task_id: str) -> None:
     try:
         info = c.status(task_id)
         click.echo(json.dumps(info, indent=2, ensure_ascii=False))
+    except DaemonNotRunningError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -832,6 +1134,9 @@ def logs(ctx: click.Context, task_id: str) -> None:
                     click.echo(item)
                 else:
                     click.echo(json.dumps(item, indent=2, ensure_ascii=False))
+    except DaemonNotRunningError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -844,11 +1149,18 @@ def logs(ctx: click.Context, task_id: str) -> None:
 @click.argument("message")
 @click.pass_context
 def input(ctx: click.Context, task_id: str, message: str) -> None:
-    """Reply to a task's user_input request."""
+    """Send input to a task.
+
+    If the agent is blocked on user_input, this replies to that request.
+    If the agent is done/cancelled, this appends a new user message and resumes it.
+    """
     c = _client(ctx)
     try:
         c.respond(task_id, message)
         click.echo("Input sent.")
+    except DaemonNotRunningError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -876,6 +1188,9 @@ def skills_list(ctx: click.Context) -> None:
             return
         for s in sk:
             click.echo(f"  {s['name']:20s}  {s.get('description', '')}")
+    except DaemonNotRunningError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     finally:
         c.close()
 
@@ -890,5 +1205,8 @@ def skills_scan(ctx: click.Context) -> None:
         click.echo(f"Found {len(sk)} skill(s).")
         for s in sk:
             click.echo(f"  {s['name']:20s}  {s.get('description', '')}")
+    except DaemonNotRunningError as e:
+        click.echo(str(e), err=True)
+        sys.exit(1)
     finally:
         c.close()

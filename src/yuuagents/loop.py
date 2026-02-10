@@ -143,6 +143,7 @@ async def _step(
     # 3. If no tool calls, we're done
     if not tool_calls:
         agent.status = AgentStatus.DONE
+        agent.state.pending_input_prompt = ""
         return
 
     # 4. Execute tools
@@ -165,6 +166,8 @@ async def _step(
     for r in results:
         content = str(r.error) if r.error else str(r.output)
         agent.history.append(yuullm.tool(r.tool_call_id, content))
+    if agent.status not in (AgentStatus.DONE, AgentStatus.ERROR, AgentStatus.CANCELLED):
+        agent.status = AgentStatus.RUNNING
 
     if recorder is not None:
         await recorder.record_tool(

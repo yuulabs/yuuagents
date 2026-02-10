@@ -8,6 +8,7 @@ import yuutools as yt
 from yuuagents.tools import BUILTIN_TOOLS, get
 from yuuagents.tools.bash import execute_bash
 from yuuagents.tools.file import delete_file, read_file, write_file
+from yuuagents.tools.user_input import user_input
 from yuuagents.tools.web import web_search
 
 
@@ -21,6 +22,7 @@ class TestBuiltinToolsRegistry:
             "read_file",
             "write_file",
             "delete_file",
+            "user_input",
             "web_search",
         }
         actual = set(BUILTIN_TOOLS.keys())
@@ -55,6 +57,11 @@ class TestBuiltinToolsRegistry:
         """web_search should be in registry."""
         assert "web_search" in BUILTIN_TOOLS
         assert BUILTIN_TOOLS["web_search"] is web_search
+
+    def test_user_input_in_registry(self) -> None:
+        """user_input should be in registry."""
+        assert "user_input" in BUILTIN_TOOLS
+        assert BUILTIN_TOOLS["user_input"] is user_input
 
 
 class TestGetFunction:

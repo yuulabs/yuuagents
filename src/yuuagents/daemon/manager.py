@@ -126,6 +126,7 @@ class AgentManager:
             workdir=self.docker.workdir,
             docker_container=container_id,
             docker=self.docker,
+            state=agent.state,
             tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
         )
 
@@ -194,6 +195,9 @@ class AgentManager:
         err: ErrorInfo | None = None
         if row.error_json is not None:
             err = msgspec.json.decode(row.error_json, type=ErrorInfo)
+        pending_prompt = ""
+        if row.status == AgentStatus.BLOCKED_ON_INPUT.value:
+            pending_prompt = await self._persistence.pending_input_prompt(task_id) or ""
         return AgentInfo(
             task_id=row.task_id,
             agent_id=row.agent_id,
@@ -202,6 +206,7 @@ class AgentManager:
             status=row.status,
             created_at=row.created_at.isoformat(),
             last_assistant_message="",
+            pending_input_prompt=pending_prompt,
             steps=row.head_turn,
             total_tokens=0,
             total_cost_usd=0.0,
@@ -217,7 +222,36 @@ class AgentManager:
         return await self._persistence.load_history(task_id)
 
     async def respond(self, task_id: str, content: str) -> None:
+        if task_id not in self._agents:
+            await self._load_task(task_id)
+
+        agent = self._agents[task_id]
         ctx = self._contexts[task_id]
+
+        if agent.status in (AgentStatus.DONE, AgentStatus.CANCELLED, AgentStatus.ERROR):
+            while not ctx.input_queue.empty():
+                ctx.input_queue.get_nowait()
+
+            agent.state.error = None
+            agent.state.pending_input_prompt = ""
+            agent.status = AgentStatus.RUNNING
+            agent.steps += 1
+
+            msg = yuullm.user(content)
+            agent.history.append(msg)
+
+            recorder = self._get_recorder(task_id)
+            if recorder is not None:
+                await recorder.record_user(turn=agent.steps, message=msg)
+
+            existing = self._tasks.get(task_id)
+            if existing is not None and not existing.done():
+                existing.cancel()
+
+            task = asyncio.create_task(self._run(agent, agent.task, ctx, resume=True))
+            self._tasks[task_id] = task
+            return
+
         await ctx.input_queue.put(content)
 
     async def cancel(self, task_id: str) -> None:
@@ -312,6 +346,10 @@ class AgentManager:
             agent.state.status = t.status
             agent.state.steps = t.head_turn
             agent.state.created_at = t.created_at
+            if self._persistence is not None and t.status == AgentStatus.BLOCKED_ON_INPUT:
+                agent.state.pending_input_prompt = (
+                    await self._persistence.pending_input_prompt(t.task_id) or ""
+                )
 
             container_id = await self.docker.resolve(
                 task_id=t.task_id,
@@ -323,6 +361,7 @@ class AgentManager:
                 workdir=self.docker.workdir,
                 docker_container=container_id,
                 docker=self.docker,
+                state=agent.state,
                 tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
             )
 
@@ -372,6 +411,7 @@ class AgentManager:
             status=agent.status.value,
             created_at=agent.created_at.isoformat(),
             last_assistant_message=self._last_assistant_message(agent),
+            pending_input_prompt=agent.state.pending_input_prompt,
             steps=agent.steps,
             total_tokens=agent.total_tokens,
             total_cost_usd=agent.total_cost_usd,
@@ -512,7 +552,74 @@ class AgentManager:
         entry = self.config.agents.get(agent_name)
         if entry and entry.tools:
             return entry.tools
-        return ["execute_bash", "read_file", "write_file", "delete_file", "web_search"]
+        return [
+            "execute_bash",
+            "read_file",
+            "write_file",
+            "delete_file",
+            "user_input",
+            "web_search",
+        ]
+
+    async def _load_task(self, task_id: str) -> None:
+        if self._persistence is None:
+            raise KeyError(task_id)
+        if task_id in self._agents:
+            return
+
+        row = await self._persistence.get_task_row(task_id)
+        if row is None:
+            raise KeyError(task_id)
+
+        err: ErrorInfo | None = None
+        if row.error_json is not None:
+            err = msgspec.json.decode(row.error_json, type=ErrorInfo)
+
+        llm_client = self._make_llm(agent_name=row.agent_id, model_override=row.model)
+        tool_names = msgspec.json.decode(row.tools_json, type=list[str])
+        tool_names = tool_names or self._default_tools(row.agent_id)
+        tool_objs = [BUILTIN_TOOLS[n] for n in tool_names if n in BUILTIN_TOOLS]
+        manager = yt.ToolManager(tool_objs)
+
+        prompt_builder = SimplePromptBuilder()
+        prompt_builder.add_section(row.system_prompt)
+
+        config = AgentConfig(
+            task_id=row.task_id,
+            agent_id=row.agent_id,
+            persona=row.persona,
+            tools=manager,
+            llm=llm_client,
+            prompt_builder=prompt_builder,
+        )
+        agent = Agent(config=config)
+        agent.state.task = row.task
+        agent.state.history = await self._persistence.load_history(task_id)
+        agent.state.status = AgentStatus(row.status)
+        agent.state.steps = row.head_turn
+        agent.state.created_at = row.created_at
+        agent.state.error = err
+        if agent.state.status == AgentStatus.BLOCKED_ON_INPUT:
+            agent.state.pending_input_prompt = (
+                await self._persistence.pending_input_prompt(task_id) or ""
+            )
+
+        container_id = await self.docker.resolve(
+            task_id=row.task_id,
+            container=row.docker_container,
+        )
+        ctx = AgentContext(
+            task_id=row.task_id,
+            agent_id=row.agent_id,
+            workdir=self.docker.workdir,
+            docker_container=container_id,
+            docker=self.docker,
+            state=agent.state,
+            tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
+        )
+
+        self._agents[task_id] = agent
+        self._contexts[task_id] = ctx
 
     def _resolve_skills(self, requested: list[str]) -> str:
         if not requested:

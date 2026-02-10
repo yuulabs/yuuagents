@@ -235,6 +235,7 @@ class TestToolIntegration:
             "read_file",
             "write_file",
             "delete_file",
+            "user_input",
             "web_search",
         }
         actual = set(BUILTIN_TOOLS.keys())
