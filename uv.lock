@@ -1261,7 +1261,7 @@ wheels = [
 
 [[package]]
 name = "yuutrace"
-version = "0.1.4"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgspec" },
@@ -1271,9 +1271,9 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/da/ec/11f044ff04e6b73787ec8f7317ff2673bc9684fde7ea8150cd9f336a43d7/yuutrace-0.1.4.tar.gz", hash = "sha256:817e679c0e5217780542e4a9b4f88073ab174b1f4d75f7904150766443ba8cb6", size = 84519, upload-time = "2026-02-09T09:16:25.169Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/5c/cbf7788cfc3aef920906f44bcdd19406af5529225e4ccc5fc65f0779f65c/yuutrace-0.1.5.tar.gz", hash = "sha256:56a3a0f13f24cdbe0cf7e0919942d71073da09dd98b792927cbb1c34218288d1", size = 84854, upload-time = "2026-02-10T07:51:57.946Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/7f/d8028260a174b7685b4121e2d6836bca351d2a58a4a62a5c572f3a1fb288/yuutrace-0.1.4-py3-none-any.whl", hash = "sha256:c759e2f41fa5c5d5a86487c13053eb6f5b2baceb7033655759e070b158e15e33", size = 90742, upload-time = "2026-02-09T09:16:23.88Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/3d/fb43380a9d34103e6514d25a67761cce59ff55f6c4ad4d2d7820fdbe5208/yuutrace-0.1.5-py3-none-any.whl", hash = "sha256:92e00c69b1a69e6f23e6c62188aabacb4f3add5a82ce9b1a2373044e5b96967e", size = 91092, upload-time = "2026-02-10T07:51:56.296Z" },
 ]
 
 [[package]]

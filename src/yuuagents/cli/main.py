@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 import shutil
 
@@ -166,6 +168,7 @@ def install(
       5. Register yagents as a systemd user service.
     """
     total_steps = 5 if systemd else 4
+    runtime_tag = _runtime_image_tag()
     # -- Step 0: resolve config sources --
     if config_path:
         # User provided a full config — requires confirmation
@@ -254,6 +257,9 @@ def install(
 
             merged_data = base_data
 
+    if not config_path:
+        merged_data = _deep_merge(merged_data, {"docker": {"image": runtime_tag}})
+
     # -- Step 1: write config --
     click.echo()
     click.echo(f"[1/{total_steps}] Installing configuration ...")
@@ -323,22 +329,41 @@ def install(
             err=True,
         )
     else:
-        if _image_exists(image):
-            click.echo(f"  Image {image} already available locally.")
-        else:
-            click.echo(f"  Pulling {image} (this may take a minute) ...")
-            result = subprocess.run(
-                ["docker", "pull", image],
-                capture_output=False,
-            )
-            if result.returncode != 0:
-                click.echo(
-                    f"  WARNING: Failed to pull {image}. "
-                    f"You can retry with `docker pull {image}`.",
-                    err=True,
-                )
+        if (
+            image == runtime_tag
+            or image.startswith("yuuagents-runtime:")
+            or image == "yuuagents-runtime"
+        ):
+            if _image_exists(image):
+                click.echo(f"  Image {image} already available locally.")
             else:
-                click.echo(f"  Image {image} pulled successfully.")
+                click.echo(f"  Building {image} (this may take a minute) ...")
+                ok = _build_runtime_image(image)
+                if not ok:
+                    click.echo(
+                        f"  WARNING: Failed to build {image}. "
+                        "You can retry by re-running `yagents install`.",
+                        err=True,
+                    )
+                else:
+                    click.echo(f"  Image {image} built successfully.")
+        else:
+            if _image_exists(image):
+                click.echo(f"  Image {image} already available locally.")
+            else:
+                click.echo(f"  Pulling {image} (this may take a minute) ...")
+                result = subprocess.run(
+                    ["docker", "pull", image],
+                    capture_output=False,
+                )
+                if result.returncode != 0:
+                    click.echo(
+                        f"  WARNING: Failed to pull {image}. "
+                        f"You can retry with `docker pull {image}`.",
+                        err=True,
+                    )
+                else:
+                    click.echo(f"  Image {image} pulled successfully.")
 
     if systemd:
         click.echo()
@@ -598,6 +623,167 @@ def _docker_available() -> bool:
     return ok
 
 
+def _runtime_image_tag() -> str:
+    try:
+        v = importlib.metadata.version("yuuagents")
+    except Exception:
+        v = "latest"
+    return f"yuuagents-runtime:{v}"
+
+
+def _runtime_dockerfile_text() -> str:
+    dockerfile_path = (
+        Path(__file__).resolve().parents[1] / "daemon" / "runtime.Dockerfile"
+    )
+    try:
+        return dockerfile_path.read_text(encoding="utf-8")
+    except Exception:
+        return _FALLBACK_RUNTIME_DOCKERFILE
+
+
+def _build_runtime_image(tag: str) -> bool:
+    dockerfile = _runtime_dockerfile_text()
+    with tempfile.TemporaryDirectory(prefix="yagents-runtime-") as td:
+        p = Path(td) / "Dockerfile"
+        p.write_text(dockerfile, encoding="utf-8")
+        result = subprocess.run(
+            ["docker", "build", "-t", tag, td],
+            capture_output=False,
+        )
+        if result.returncode != 0:
+            return False
+
+        if tag != "yuuagents-runtime:latest":
+            subprocess.run(
+                ["docker", "tag", tag, "yuuagents-runtime:latest"],
+                capture_output=False,
+            )
+
+        return True
+
+
+_FALLBACK_RUNTIME_DOCKERFILE = """\
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN set -eux; \\
+    for i in 1 2 3; do \\
+        apt-get update -y \\
+        && apt-get install -y --no-install-recommends --fix-missing \\
+            bash \\
+            ca-certificates \\
+            coreutils \\
+            diffutils \\
+            findutils \\
+            gawk \\
+            patch \\
+            sed \\
+            tmux \\
+        && break; \\
+        sleep 2; \\
+    done; \\
+    rm -rf /var/lib/apt/lists/*
+
+RUN cat > /usr/local/bin/yagents-apply-patch <<'EOF'
+#!/usr/bin/env bash
+set +e
+
+target="$1"
+if [ -z "$target" ]; then
+  echo "missing target path"
+  echo "__YAGENTS_EXIT_CODE__=2"
+  exit 0
+fi
+case "$target" in
+  /*) ;;
+  *)
+    echo "target path must be absolute: $target"
+    echo "__YAGENTS_EXIT_CODE__=2"
+    exit 0
+    ;;
+esac
+
+before="$(mktemp)"
+after="$(mktemp)"
+patch_raw="$(mktemp)"
+patch_rewritten="$(mktemp)"
+
+cleanup() {
+  rm -f "$before" "$after" "$patch_raw" "$patch_rewritten"
+}
+trap cleanup EXIT
+
+mkdir -p "$(dirname "$target")"
+
+if [ -f "$target" ]; then
+  cat "$target" > "$before"
+else
+  : > "$before"
+fi
+
+cat > "$patch_raw"
+if [ "$?" -ne 0 ]; then
+  echo "failed to read patch"
+  echo "__YAGENTS_EXIT_CODE__=3"
+  exit 0
+fi
+
+awk -v tgt="$target" '
+BEGIN { done_old=0; done_new=0 }
+{
+  if (!done_old && $0 ~ /^--- /) { print "--- " tgt; done_old=1; next }
+  if (!done_new && $0 ~ /^\\+\\+\\+ /) { print "+++ " tgt; done_new=1; next }
+  print $0
+}
+' "$patch_raw" > "$patch_rewritten"
+
+patch -p0 -u -N --silent < "$patch_rewritten"
+code=$?
+if [ "$code" -ne 0 ]; then
+  echo "patch failed (exit=$code)"
+  echo "__YAGENTS_EXIT_CODE__=$code"
+  exit 0
+fi
+
+if [ -f "$target" ]; then
+  cat "$target" > "$after"
+else
+  : > "$after"
+fi
+
+if cmp -s "$before" "$after"; then
+  echo "$target"
+  echo "no-op"
+  echo "hunks: 0"
+  echo "lines: +0 -0"
+  echo "__YAGENTS_EXIT_CODE__=0"
+  exit 0
+fi
+
+read hunks added removed <<EOF2
+$(diff -u "$before" "$after" | awk '
+BEGIN { h=0; a=0; r=0 }
+/^@@ / { h++ }
+/^\\+\\+\\+ / { next }
+/^--- / { next }
+/^\\+/ { a++; next }
+/^-/ { r++; next }
+END { printf "%d %d %d\\n", h, a, r }
+')
+EOF2
+
+echo "$target"
+echo "hunks: $hunks"
+echo "lines: +$added -$removed"
+echo "__YAGENTS_EXIT_CODE__=0"
+exit 0
+EOF
+
+RUN chmod +x /usr/local/bin/yagents-apply-patch
+"""
+
+
 def _image_exists(image: str) -> bool:
     """Check if a Docker image exists locally."""
     try:
@@ -713,6 +899,11 @@ def config(
             config_dict = {
                 "db": {
                     "url": cfg.db.url,
+                },
+                "yuutrace": {
+                    "db_path": cfg.yuutrace.db_path,
+                    "ui_port": cfg.yuutrace.ui_port,
+                    "server_port": cfg.yuutrace.server_port,
                 },
                 "daemon": {
                     "socket": cfg.daemon.socket,
@@ -1168,6 +1359,29 @@ def input(ctx: click.Context, task_id: str, message: str) -> None:
         sys.exit(1)
     finally:
         c.close()
+
+
+# ── Trace ──
+
+
+@cli.group()
+def trace() -> None:
+    """Manage tracing."""
+
+
+@trace.command("ui")
+def trace_ui() -> None:
+    """Start yuutrace WebUI."""
+    cfg = load_config()
+    ytrace_bin = shutil.which("ytrace")
+    if ytrace_bin is None:
+        click.echo("Error: ytrace not found in PATH", err=True)
+        sys.exit(1)
+    db_path = str(Path(cfg.yuutrace.db_path).expanduser())
+    port = str(cfg.yuutrace.ui_port)
+    cmd = [ytrace_bin, "ui", "--db", db_path, "--port", port]
+    click.echo(f"Starting trace UI on http://127.0.0.1:{port} ...")
+    raise SystemExit(subprocess.call(cmd))
 
 
 # ── Skills ──

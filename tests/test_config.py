@@ -17,6 +17,7 @@ from yuuagents.config import (
     ProviderConfig,
     SkillsConfig,
     TavilyConfig,
+    YuuTraceConfig,
     _deep_merge,
     load,
     load_merged,
@@ -45,7 +46,7 @@ class TestDockerConfig:
 
     def test_default_values(self) -> None:
         cfg = DockerConfig()
-        assert cfg.image == "ubuntu:24.04"
+        assert cfg.image == "yuuagents-runtime:latest"
 
     def test_custom_image(self) -> None:
         cfg = DockerConfig(image="python:3.12")
@@ -84,6 +85,20 @@ class TestDbConfig:
     def test_custom_url(self) -> None:
         cfg = DbConfig(url="sqlite+aiosqlite:////tmp/x.sqlite3")
         assert cfg.url == "sqlite+aiosqlite:////tmp/x.sqlite3"
+
+
+class TestYuuTraceConfig:
+    def test_default_values(self) -> None:
+        cfg = YuuTraceConfig()
+        assert cfg.db_path == "~/.yagents/traces.db"
+        assert cfg.ui_port == 8080
+        assert cfg.server_port == 4318
+
+    def test_custom_values(self) -> None:
+        cfg = YuuTraceConfig(db_path="/tmp/t.db", ui_port=9000, server_port=14318)
+        assert cfg.db_path == "/tmp/t.db"
+        assert cfg.ui_port == 9000
+        assert cfg.server_port == 14318
 
 
 class TestPricingEntry:
@@ -183,6 +198,7 @@ class TestConfig:
         cfg = Config()
         assert isinstance(cfg.daemon, DaemonConfig)
         assert isinstance(cfg.db, DbConfig)
+        assert isinstance(cfg.yuutrace, YuuTraceConfig)
         assert isinstance(cfg.docker, DockerConfig)
         assert isinstance(cfg.skills, SkillsConfig)
         assert isinstance(cfg.tavily, TavilyConfig)
@@ -251,6 +267,12 @@ class TestConfig:
         )
         assert cfg.validate() == []
 
+    def test_validate_yuutrace_ports(self) -> None:
+        cfg = Config(yuutrace=YuuTraceConfig(ui_port=0, server_port=70000))
+        errors = cfg.validate()
+        assert "yuutrace.ui_port" in "\n".join(errors)
+        assert "yuutrace.server_port" in "\n".join(errors)
+
     def test_nested_config_modification(self) -> None:
         cfg = Config()
         cfg.docker.image = "python:3.12"
@@ -297,7 +319,7 @@ class TestLoadConfig:
     def test_load_missing_file_returns_defaults(self) -> None:
         cfg = load("/nonexistent/path/config.yaml")
         assert isinstance(cfg, Config)
-        assert cfg.docker.image == "ubuntu:24.04"
+        assert cfg.docker.image == "yuuagents-runtime:latest"
 
     def test_load_minimal_config(self, tmp_path: Path) -> None:
         config_file = tmp_path / "config.yaml"
@@ -305,7 +327,7 @@ class TestLoadConfig:
         cfg = load(config_file)
         assert cfg.daemon.socket == "/tmp/test.sock"
         # Other sections should have defaults
-        assert cfg.docker.image == "ubuntu:24.04"
+        assert cfg.docker.image == "yuuagents-runtime:latest"
 
     def test_load_full_config(self, tmp_path: Path) -> None:
         config_file = tmp_path / "config.yaml"
@@ -409,7 +431,7 @@ agents:
         config_file.write_text("")
         cfg = load(config_file)
         assert isinstance(cfg, Config)
-        assert cfg.docker.image == "ubuntu:24.04"
+        assert cfg.docker.image == "yuuagents-runtime:latest"
 
     def test_load_invalid_yaml(self, tmp_path: Path) -> None:
         config_file = tmp_path / "config.yaml"

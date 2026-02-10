@@ -346,7 +346,10 @@ class AgentManager:
             agent.state.status = t.status
             agent.state.steps = t.head_turn
             agent.state.created_at = t.created_at
-            if self._persistence is not None and t.status == AgentStatus.BLOCKED_ON_INPUT:
+            if (
+                self._persistence is not None
+                and t.status == AgentStatus.BLOCKED_ON_INPUT
+            ):
                 agent.state.pending_input_prompt = (
                     await self._persistence.pending_input_prompt(t.task_id) or ""
                 )

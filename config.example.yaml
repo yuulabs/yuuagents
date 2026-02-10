@@ -20,6 +20,15 @@ db:
   # SQLAlchemy async URL. For sqlite, you can use a local file path URL.
   url: sqlite+aiosqlite:///~/.yagents/tasks.sqlite3
 
+# -- Trace (yuutrace) ---------------------------------------------------------
+yuutrace:
+  # Path to the SQLite database used by `ytrace server` / `ytrace ui`.
+  db_path: ~/.yagents/traces.db
+  # Port for `ytrace ui`.
+  ui_port: 8080
+  # Port for `ytrace server` OTEL HTTP receiver.
+  server_port: 4318
+
 # -- Daemon -------------------------------------------------------------------
 
 daemon:
@@ -39,8 +48,9 @@ daemon:
 
 docker:
   # Default Docker image for agent containers.
-  # The image must have `bash` available.  `yagents setup` will pull this image.
-  image: ubuntu:24.04
+  # The image must include all yagents runtime requirements (bash, tmux, patch,
+  # and /usr/local/bin/yagents-apply-patch). `yagents install` will build it.
+  image: yuuagents-runtime:latest
 
 # -- Agent Skills -------------------------------------------------------------
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.metadata
 import os
 import re
 import shlex
@@ -32,7 +33,7 @@ You are running commands inside a Docker container.
 class DockerManager:
     """Manage Docker containers for agent bash/file tools."""
 
-    image: str = "ubuntu:24.04"
+    image: str = "yuuagents-runtime:latest"
     container_home: str = "/home/yuu"
     uid: int | None = None
     gid: int | None = None
@@ -43,7 +44,8 @@ class DockerManager:
     _terminal_locks: dict[tuple[str, str], asyncio.Lock] = field(
         factory=dict, repr=False
     )
-    _tmux_ready: set[str] = field(factory=set, repr=False)
+    _tooling_ready: set[str] = field(factory=set, repr=False)
+    _tooling_locks: dict[str, asyncio.Lock] = field(factory=dict, repr=False)
 
     @property
     def workdir(self) -> str:
@@ -109,7 +111,9 @@ class DockerManager:
                 if not info["State"]["Running"]:
                     await c.start()
                     info = await c.show()
-                return info["Id"]
+                cid = info["Id"]
+                await self._ensure_required_tooling(cid)
+                return cid
             except Exception as exc:
                 raise ValueError(f"container not found: {container}") from exc
 
@@ -117,6 +121,7 @@ class DockerManager:
             cid = await self._create(image=image, task_id=task_id)
             if task_id:
                 self._containers[task_id] = cid
+            await self._ensure_required_tooling(cid)
             return cid
 
         assert self.default_container
@@ -152,7 +157,7 @@ class DockerManager:
             self._terminal_locks[key] = lock
 
         async with lock:
-            await self._ensure_tmux(container_id)
+            await self._ensure_required_tooling(container_id)
             await self._ensure_tmux_session(container_id, session_name)
             return await self._exec_tmux_command(
                 container_id=container_id,
@@ -243,52 +248,82 @@ class DockerManager:
         assert code_raw.isdigit()
         return int(code_raw)
 
-    async def _ensure_tmux(self, container_id: str) -> None:
-        if container_id in self._tmux_ready:
+    async def _ensure_required_tooling(self, container_id: str) -> None:
+        if container_id in self._tooling_ready:
             return
 
-        probe = await self._exec_with_shell(
-            container_id,
-            "bash",
-            "command -v tmux >/dev/null 2>&1; echo __YAGENTS_EXIT_CODE__=$?",
-            30,
-        )
-        if self._parse_exit_code_marker(probe) == 0:
-            self._tmux_ready.add(container_id)
-            return
+        lock = self._tooling_locks.get(container_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._tooling_locks[container_id] = lock
 
-        install = r"""\
-set +e
-command -v apt-get >/dev/null 2>&1
-if [ "$?" -ne 0 ]; then
-  echo "persistent terminal support is unavailable (missing package manager)"
-  echo "__YAGENTS_EXIT_CODE__=2"
-  exit 0
-fi
-apt-get update -y >/dev/null 2>&1
-apt-get install -y --no-install-recommends tmux >/dev/null 2>&1
-if [ "$?" -ne 0 ]; then
-  echo "failed to install persistent terminal support"
-  echo "__YAGENTS_EXIT_CODE__=1"
-  exit 0
-fi
-echo "__YAGENTS_EXIT_CODE__=0"
-exit 0
+        async with lock:
+            if container_id in self._tooling_ready:
+                return
+
+            missing = await self._missing_required_tooling(container_id)
+            if missing:
+                raise ValueError(self._missing_tooling_error(container_id, missing))
+            self._tooling_ready.add(container_id)
+
+    async def _missing_required_tooling(self, container_id: str) -> list[str]:
+        cmd = r"""\
+missing=""
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || missing="$missing $1"
+}
+
+need_cmd bash
+need_cmd tmux
+need_cmd patch
+need_cmd diff
+need_cmd base64
+need_cmd awk
+need_cmd mktemp
+need_cmd cmp
+need_cmd cat
+need_cmd rm
+need_cmd mkdir
+need_cmd dirname
+
+test -x /usr/local/bin/yagents-apply-patch || missing="$missing yagents-apply-patch"
+
+echo "$missing"
 """
-        out = await self._exec_with_shell(
-            container_id,
-            "bash",
-            install,
-            180,
-            user="0:0",
-            workdir="/",
-            environment={
-                "HOME": "/root",
-                "DEBIAN_FRONTEND": "noninteractive",
-            },
+        try:
+            out = await self._exec_with_shell(container_id, "sh", cmd, 30)
+        except Exception as exc:
+            raise ValueError(
+                f"container tooling check failed (container={container_id[:12]}): {exc}"
+            ) from exc
+
+        raw = out.strip()
+        if not raw:
+            return []
+        return [p for p in raw.split() if p]
+
+    @staticmethod
+    def _missing_tooling_error(container_id: str, missing: list[str]) -> str:
+        try:
+            pkg_version = importlib.metadata.version("yuuagents")
+        except Exception:
+            pkg_version = ""
+
+        runtime_hint = (
+            f"yuuagents-runtime:{pkg_version}"
+            if pkg_version
+            else "yuuagents-runtime:<version>"
         )
-        assert self._parse_exit_code_marker(out) == 0, out
-        self._tmux_ready.add(container_id)
+        tools = ", ".join(missing)
+        return (
+            "container image does not satisfy yagents runtime requirements\n"
+            f"- container: {container_id}\n"
+            f"- missing: {tools}\n"
+            "\n"
+            "If you use a custom image/container, you must preinstall all required tools.\n"
+            f"If you use the default install flow, build the runtime image (tag: {runtime_hint})."
+        )
 
     async def _ensure_tmux_session(self, container_id: str, session_name: str) -> None:
         q = shlex.quote(session_name)
@@ -332,7 +367,7 @@ exit 0
         payload = (
             f"printf '\\n{begin}\\n'; "
             f"__y_cmd=$(printf %s {cmd_b64} | base64 -d); "
-            f"eval \"$__y_cmd\"; __y_code=$?; "
+            f'eval "$__y_cmd"; __y_code=$?; '
             f"printf '\\n{end_prefix} __YAGENTS_EXIT_CODE__=%s\\n' \"$__y_code\""
         )
 
@@ -384,162 +419,17 @@ exit 0
             return f"{body}\n[exit code: {code}]".strip()
         return body
 
-    async def _ensure_default_tooling(self, container_id: str) -> None:
-        command = r"""\
-set +e
-
-need_install=0
-command -v patch >/dev/null 2>&1 || need_install=1
-command -v diff >/dev/null 2>&1 || need_install=1
-command -v tmux >/dev/null 2>&1 || need_install=1
-
-if [ "$need_install" -eq 1 ]; then
-  command -v apt-get >/dev/null 2>&1
-  if [ "$?" -ne 0 ]; then
-    echo "missing required tools and no apt-get available"
-    echo "__YAGENTS_EXIT_CODE__=2"
-    exit 0
-  fi
-  apt-get update -y >/dev/null 2>&1
-  apt-get install -y --no-install-recommends patch diffutils tmux ca-certificates >/dev/null 2>&1
-  if [ "$?" -ne 0 ]; then
-    echo "failed to install required tools"
-    echo "__YAGENTS_EXIT_CODE__=1"
-    exit 0
-  fi
-fi
-
-if [ ! -x /usr/local/bin/yagents-apply-patch ]; then
-  cat > /usr/local/bin/yagents-apply-patch <<'EOF'
-#!/usr/bin/env bash
-set +e
-
-target="$1"
-if [ -z "$target" ]; then
-  echo "missing target path"
-  echo "__YAGENTS_EXIT_CODE__=2"
-  exit 0
-fi
-case "$target" in
-  /*) ;;
-  *)
-    echo "target path must be absolute: $target"
-    echo "__YAGENTS_EXIT_CODE__=2"
-    exit 0
-    ;;
-esac
-
-before="$(mktemp)"
-after="$(mktemp)"
-patch_raw="$(mktemp)"
-patch_rewritten="$(mktemp)"
-
-cleanup() {
-  rm -f "$before" "$after" "$patch_raw" "$patch_rewritten"
-}
-trap cleanup EXIT
-
-mkdir -p "$(dirname "$target")"
-
-if [ -f "$target" ]; then
-  cat "$target" > "$before"
-else
-  : > "$before"
-fi
-
-cat > "$patch_raw"
-if [ "$?" -ne 0 ]; then
-  echo "failed to read patch"
-  echo "__YAGENTS_EXIT_CODE__=3"
-  exit 0
-fi
-
-awk -v tgt="$target" '
-BEGIN { done_old=0; done_new=0 }
-{
-  if (!done_old && $0 ~ /^--- /) { print "--- " tgt; done_old=1; next }
-  if (!done_new && $0 ~ /^\+\+\+ /) { print "+++ " tgt; done_new=1; next }
-  print $0
-}
-' "$patch_raw" > "$patch_rewritten"
-
-patch -p0 -u -N --silent < "$patch_rewritten"
-code=$?
-if [ "$code" -ne 0 ]; then
-  echo "patch failed (exit=$code)"
-  echo "__YAGENTS_EXIT_CODE__=$code"
-  exit 0
-fi
-
-if [ -f "$target" ]; then
-  cat "$target" > "$after"
-else
-  : > "$after"
-fi
-
-if cmp -s "$before" "$after"; then
-  echo "$target"
-  echo "no-op"
-  echo "hunks: 0"
-  echo "lines: +0 -0"
-  echo "__YAGENTS_EXIT_CODE__=0"
-  exit 0
-fi
-
-read hunks added removed <<EOF2
-$(diff -u "$before" "$after" | awk '
-BEGIN { h=0; a=0; r=0 }
-/^@@ / { h++ }
-/^\+\+\+ / { next }
-/^--- / { next }
-/^\+/ { a++; next }
-/^-/ { r++; next }
-END { printf "%d %d %d\n", h, a, r }
-')
-EOF2
-
-echo "$target"
-echo "hunks: $hunks"
-echo "lines: +$added -$removed"
-echo "__YAGENTS_EXIT_CODE__=0"
-exit 0
-EOF
-  chmod +x /usr/local/bin/yagents-apply-patch >/dev/null 2>&1
-  if [ "$?" -ne 0 ]; then
-    echo "failed to install /usr/local/bin/yagents-apply-patch"
-    echo "__YAGENTS_EXIT_CODE__=1"
-    exit 0
-  fi
-fi
-
-echo "__YAGENTS_EXIT_CODE__=0"
-exit 0
-"""
-
-        output = await self._exec_with_shell(
-            container_id,
-            "bash",
-            command,
-            180,
-            user="0:0",
-            workdir="/",
-            environment={
-                "HOME": "/root",
-                "DEBIAN_FRONTEND": "noninteractive",
-            },
-        )
-        lines = output.splitlines()
-        assert lines and lines[-1].startswith("__YAGENTS_EXIT_CODE__=")
-        code_raw = lines[-1].removeprefix("__YAGENTS_EXIT_CODE__=").strip()
-        assert code_raw.isdigit()
-        assert int(code_raw) == 0, output
-        self._tmux_ready.add(container_id)
-
     async def cleanup(self, task_id: str) -> None:
         """Remove a per-task container (if we created one)."""
         cid = self._containers.pop(task_id, None)
         if cid and cid != self.default_container:
             await self._remove(cid)
+        if cid:
+            self._tooling_ready.discard(cid)
+            self._tooling_locks.pop(cid, None)
+            for key in list(self._terminal_locks):
+                if key[0] == cid:
+                    self._terminal_locks.pop(key, None)
 
     # -- private --
 
@@ -554,18 +444,18 @@ exit 0
             info = await container.show()
             if info["State"]["Running"]:
                 cid = info["Id"]
-                await self._ensure_default_tooling(cid)
+                await self._ensure_required_tooling(cid)
                 return cid
             await container.start()
             info = await container.show()
             cid = info["Id"]
-            await self._ensure_default_tooling(cid)
+            await self._ensure_required_tooling(cid)
             return cid
         except Exception:
             pass
 
         cid = await self._create(image=self.image, name=name)
-        await self._ensure_default_tooling(cid)
+        await self._ensure_required_tooling(cid)
         return cid
 
     async def _create(
@@ -627,6 +517,11 @@ exit 0
         except DockerError as exc:
             if getattr(exc, "status", None) != 404:
                 raise
+
+        if image.startswith("yuuagents-runtime:") or image == "yuuagents-runtime":
+            raise RuntimeError(
+                f"missing runtime image {image!r}; run `yagents install` to build it"
+            )
 
         # Pull missing image. Support "repo:tag" while keeping registry ports intact.
         from_image = image

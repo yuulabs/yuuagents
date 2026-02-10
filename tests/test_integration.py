@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yuullm
+import yuutrace as ytrace
 import yuutools as yt
 
 from yuuagents.agent import Agent, AgentConfig, SimplePromptBuilder
@@ -103,6 +104,7 @@ class TestAgentLifecycle:
             docker_container="dummy",
         )
 
+        ytrace.init(service_name="yuuagents")
         await run_agent(agent, "hello", ctx)
         assert agent.status == AgentStatus.DONE
         assert agent.steps == 1
@@ -306,7 +308,7 @@ class TestConfigLoading:
     def test_load_default_config(self) -> None:
         """Should load default config."""
         config = Config()
-        assert config.docker.image == "ubuntu:24.04"
+        assert config.docker.image == "yuuagents-runtime:latest"
 
     def test_load_from_yaml(self) -> None:
         """Should load config from YAML file."""

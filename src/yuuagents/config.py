@@ -33,7 +33,7 @@ class DaemonConfig(msgspec.Struct, kw_only=True):
 class DockerConfig(msgspec.Struct, kw_only=True):
     """Default container setup."""
 
-    image: str = "ubuntu:24.04"
+    image: str = "yuuagents-runtime:latest"
 
 
 class SkillsConfig(msgspec.Struct, kw_only=True):
@@ -46,6 +46,12 @@ class TavilyConfig(msgspec.Struct, kw_only=True):
 
 class DbConfig(msgspec.Struct, kw_only=True):
     url: str = "sqlite+aiosqlite:///~/.yagents/tasks.sqlite3"
+
+
+class YuuTraceConfig(msgspec.Struct, kw_only=True):
+    db_path: str = "~/.yagents/traces.db"
+    ui_port: int = 8080
+    server_port: int = 4318
 
 
 class PricingEntry(msgspec.Struct, kw_only=True):
@@ -97,6 +103,7 @@ class AgentEntry(msgspec.Struct, kw_only=True):
 class Config(msgspec.Struct, kw_only=True):
     daemon: DaemonConfig = msgspec.field(default_factory=DaemonConfig)
     db: DbConfig = msgspec.field(default_factory=DbConfig)
+    yuutrace: YuuTraceConfig = msgspec.field(default_factory=YuuTraceConfig)
     docker: DockerConfig = msgspec.field(default_factory=DockerConfig)
     skills: SkillsConfig = msgspec.field(default_factory=SkillsConfig)
     tavily: TavilyConfig = msgspec.field(default_factory=TavilyConfig)
@@ -129,6 +136,12 @@ class Config(msgspec.Struct, kw_only=True):
         errors: list[str] = []
         if not self.db.url:
             errors.append("db.url must not be empty")
+        if not self.yuutrace.db_path:
+            errors.append("yuutrace.db_path must not be empty")
+        if not (1 <= self.yuutrace.ui_port <= 65535):
+            errors.append("yuutrace.ui_port must be in range 1..65535")
+        if not (1 <= self.yuutrace.server_port <= 65535):
+            errors.append("yuutrace.server_port must be in range 1..65535")
         for agent_name, entry in self.agents.items():
             if entry.provider and entry.provider not in self.providers:
                 errors.append(

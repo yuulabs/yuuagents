@@ -536,9 +536,7 @@ class TaskWriter:
                         )
                         await session.execute(
                             update(TaskRow)
-                            .where(
-                                TaskRow.task_id == task_id
-                            )
+                            .where(TaskRow.task_id == task_id)
                             .values(status=status)
                         )
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import uuid
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -14,9 +16,40 @@ from yuuagents.daemon.docker import (
 )
 
 
+def _image_exists(image: str) -> bool:
+    result = subprocess.run(
+        ["docker", "image", "inspect", image],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.returncode == 0
+
+
+def _build_runtime_image(tag: str) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    dockerfile = repo_root / "src" / "yuuagents" / "daemon" / "runtime.Dockerfile"
+    subprocess.run(
+        ["docker", "build", "-t", tag, "-f", str(dockerfile), str(repo_root)],
+        capture_output=False,
+        check=True,
+    )
+
+
+@pytest.fixture(scope="session")
+def runtime_image_tag() -> str:
+    return "yuuagents-runtime:latest"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_runtime_image(runtime_image_tag: str) -> None:
+    if not _image_exists(runtime_image_tag):
+        _build_runtime_image(runtime_image_tag)
+
+
 @pytest_asyncio.fixture
-async def started_docker_manager() -> DockerManager:  # type:ignore
-    manager = DockerManager()
+async def started_docker_manager(runtime_image_tag: str) -> DockerManager:  # type:ignore
+    manager = DockerManager(image=runtime_image_tag)
     await manager.start()
     try:
         yield manager
@@ -47,7 +80,7 @@ class TestDockerManagerCreation:
     def test_default_creation(self) -> None:
         """Should create with defaults."""
         manager = DockerManager()
-        assert manager.image == "ubuntu:24.04"
+        assert manager.image == "yuuagents-runtime:latest"
         assert manager.default_container == ""
 
     def test_custom_image(self) -> None:
@@ -114,12 +147,20 @@ class TestDockerManagerResolve:
         """resolve() with image should create new container."""
         manager = started_docker_manager
         task_id = uuid.uuid4().hex
-        container_id = await manager.resolve(task_id=task_id, image="alpine:latest")
+        container_id = await manager.resolve(task_id=task_id, image=manager.image)
         assert container_id != manager.default_container_id
         assert len(container_id) > 0
 
         result = await manager.exec(container_id, "echo alpine-test", timeout=30)
         assert "alpine-test" in result
+
+    async def test_resolve_with_noncompliant_image_raises(
+        self, started_docker_manager: DockerManager
+    ) -> None:
+        manager = started_docker_manager
+        task_id = uuid.uuid4().hex
+        with pytest.raises(ValueError):
+            await manager.resolve(task_id=task_id, image="alpine:latest")
 
     async def test_resolve_with_existing_container(
         self, started_docker_manager: DockerManager
@@ -206,7 +247,9 @@ class TestDockerManagerTerminalSession:
         container_id = manager.default_container_id
         session_id = uuid.uuid4().hex
 
-        result = await manager.exec_terminal(container_id, session_id, "pwd", timeout=60)
+        result = await manager.exec_terminal(
+            container_id, session_id, "pwd", timeout=60
+        )
         assert "/home/yuu" in result
 
         result = await manager.exec_terminal(
@@ -214,7 +257,9 @@ class TestDockerManagerTerminalSession:
         )
         assert result.strip().endswith("/")
 
-        result = await manager.exec_terminal(container_id, session_id, "pwd", timeout=60)
+        result = await manager.exec_terminal(
+            container_id, session_id, "pwd", timeout=60
+        )
         assert result.strip().endswith("/")
 
 
@@ -229,7 +274,7 @@ class TestDockerManagerCleanup:
         manager = started_docker_manager
         task_id = uuid.uuid4().hex
 
-        container_id = await manager.resolve(task_id=task_id, image="alpine:latest")
+        container_id = await manager.resolve(task_id=task_id, image=manager.image)
         result = await manager.exec(container_id, "echo before", timeout=30)
         assert "before" in result
 
@@ -237,7 +282,7 @@ class TestDockerManagerCleanup:
         with pytest.raises(ValueError):
             await manager.resolve(container=container_id)
 
-        new_id = await manager.resolve(task_id=task_id, image="alpine:latest")
+        new_id = await manager.resolve(task_id=task_id, image=manager.image)
         result = await manager.exec(new_id, "echo after", timeout=30)
         assert "after" in result
 
@@ -290,7 +335,7 @@ class TestDockerManagerConcurrency:
         containers = []
         for _ in range(3):
             task_id = uuid.uuid4().hex
-            cid = await manager.resolve(task_id=task_id, image="alpine:latest")
+            cid = await manager.resolve(task_id=task_id, image=manager.image)
             containers.append(cid)
 
         for i, cid in enumerate(containers):

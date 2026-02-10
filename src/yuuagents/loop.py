@@ -27,7 +27,6 @@ async def run(
     if not resume:
         agent.setup(task)
 
-    ytrace.init(service_name="yuuagents")
     with ytrace.conversation(
         id=UUID(agent.task_id),
         agent=agent.agent_id,
