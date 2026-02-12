@@ -18,6 +18,15 @@ from loguru import logger
 
 _DOCKERS_ROOT = Path("~/.yagents/dockers").expanduser()
 
+_PROXY_KEYS = ("http_proxy", "https_proxy", "no_proxy",
+               "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+
+
+def _proxy_env() -> dict[str, str]:
+    """Collect proxy env vars from the host process."""
+    return {k: v for k in _PROXY_KEYS if (v := os.environ.get(k))}
+
+
 # Injected into every agent's system prompt so it knows the mount layout.
 DOCKER_SYSTEM_PROMPT = """\
 <docker_environment>
@@ -179,23 +188,18 @@ class DockerManager:
     ) -> str:
         assert self._client is not None
         container = self._client.containers.container(container_id)
-        if user is None:
-            exe = await container.exec(
-                cmd=[shell, "-c", command],
-                stdout=True,
-                stderr=True,
-                workdir=workdir or self.workdir,
-                environment=environment or {"HOME": self.container_home},
-            )
-        else:
-            exe = await container.exec(
-                cmd=[shell, "-c", command],
-                stdout=True,
-                stderr=True,
-                workdir=workdir or self.workdir,
-                environment=environment or {"HOME": self.container_home},
-                user=user,
-            )
+        if environment is None:
+            environment = {"HOME": self.container_home, **_proxy_env()}
+        kwargs: dict = dict(
+            cmd=[shell, "-c", command],
+            stdout=True,
+            stderr=True,
+            workdir=workdir or self.workdir,
+            environment=environment,
+        )
+        if user is not None:
+            kwargs["user"] = user
+        exe = await container.exec(**kwargs)
 
         started = exe.start()
         if asyncio.iscoroutine(started):  # pragma: no cover
@@ -480,11 +484,14 @@ echo "$missing"
 
         container_home = self.container_home
 
+        env_list = [f"HOME={container_home}"]
+        env_list.extend(f"{k}={v}" for k, v in _proxy_env().items())
+
         config: dict = {
             "Image": image,
             "Cmd": ["sleep", "infinity"],
             "Tty": False,
-            "Env": [f"HOME={container_home}"],
+            "Env": env_list,
             "WorkingDir": container_home,
             "User": self._user_spec(),
             "HostConfig": {

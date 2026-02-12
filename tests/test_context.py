@@ -33,6 +33,8 @@ class TestAgentContext:
             workdir="/root",
             docker_container="container-abc",
         )
+        assert ctx.delegate_depth == 0
+        assert ctx.manager is None
         assert ctx.docker is None
         assert isinstance(ctx.input_queue, asyncio.Queue)
         assert ctx.tavily_api_key == ""

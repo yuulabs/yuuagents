@@ -93,9 +93,12 @@ class AgentEntry(msgspec.Struct, kw_only=True):
     override the model, persona, tools, and skills.
     """
 
+    description: str
     provider: str = ""
     model: str = ""
     persona: str = ""
+    max_steps: int = 0  # 0 = unlimited
+    subagents: list[str] = msgspec.field(default_factory=list)
     tools: list[str] = msgspec.field(default_factory=list)
     skills: list[str] = msgspec.field(default_factory=list)
 
@@ -143,11 +146,25 @@ class Config(msgspec.Struct, kw_only=True):
         if not (1 <= self.yuutrace.server_port <= 65535):
             errors.append("yuutrace.server_port must be in range 1..65535")
         for agent_name, entry in self.agents.items():
+            if not entry.description.strip():
+                errors.append(f"agents.{agent_name}.description must not be empty")
             if entry.provider and entry.provider not in self.providers:
                 errors.append(
                     f"agents.{agent_name}.provider references unknown "
                     f"provider {entry.provider!r}"
                 )
+            for sub in entry.subagents:
+                if sub == "*":
+                    continue
+                if sub == agent_name:
+                    errors.append(
+                        f"agents.{agent_name}.subagents must not include itself"
+                    )
+                    continue
+                if sub not in self.agents:
+                    errors.append(
+                        f"agents.{agent_name}.subagents references unknown agent {sub!r}"
+                    )
         return errors
 
 

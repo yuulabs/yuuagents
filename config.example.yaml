@@ -93,11 +93,15 @@ providers:
 
 agents:
   main:
+    description: >
+      A senior software engineer who writes clean, well-tested code.
     provider: openai-default
     model: gpt-4o
     persona: >
       You are a senior software engineer. You write clean,
       well-tested code. You prefer simple solutions and avoid over-engineering.
+    subagents:
+      - researcher
     tools:
       - execute_bash
       - read_file
@@ -108,6 +112,8 @@ agents:
       - "*"                          # "*" = inject all discovered skills
 
   researcher:
+    description: >
+      A research assistant who searches the web and writes clear reports.
     provider: openai-default
     model: gpt-4o
     persona: >

@@ -48,6 +48,7 @@ class AgentConfig:
     tools: yt.ToolManager
     llm: yuullm.YLLMClient
     prompt_builder: PromptBuilder
+    max_steps: int = 0  # 0 = unlimited
 
 
 @define
@@ -163,6 +164,10 @@ class Agent:
             error_type=type(exc).__name__,
             timestamp=datetime.now(timezone.utc),
         )
+
+    @property
+    def max_steps(self) -> int:
+        return self.config.max_steps
 
     def done(self) -> bool:
         """Check if the agent has reached a terminal state."""

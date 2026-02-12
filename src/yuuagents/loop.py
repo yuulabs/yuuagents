@@ -53,9 +53,7 @@ def _trace_llm_gen_items(items: list[Any]) -> list[Any]:
                         args = tc.arguments
                 else:
                     args = {}
-                tool_buf.append(
-                    {"id": tc.id, "function": tc.name, "arguments": args}
-                )
+                tool_buf.append({"id": tc.id, "function": tc.name, "arguments": args})
             case yuullm.Reasoning():
                 pass
             case _:
@@ -89,6 +87,9 @@ async def run(
         chat.user(task if not resume else agent.task)
 
         while not agent.done():
+            if agent.max_steps and agent.steps >= agent.max_steps:
+                agent.status = AgentStatus.DONE
+                break
             try:
                 await _step(agent, chat, ctx, recorder=recorder)
             except Exception as exc:
@@ -208,6 +209,7 @@ async def _step(
             calls.append(
                 {
                     "tool_call_id": tc.id,
+                    "name": tc.name,
                     "tool": bound.run,
                     "params": params,
                 }

@@ -13,7 +13,7 @@ from yuuagents.context import DockerExecutor
         "timeout": "Timeout in seconds (default 120, max 600)",
     },
     description=(
-        "Execute a bash command in the Docker container. Commands run in a persistent "
+        "Execute a bash command in the Docker container(work dir is `/home/yuu`). Commands run in a persistent "
         "terminal-like session: working directory and environment variables persist "
         "across calls."
     ),

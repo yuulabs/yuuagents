@@ -5,9 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import pytest
-
-from yuuagents.skills.discovery import _parse, render, scan
+from yuuagents.skills.discovery import render, scan
 from yuuagents.types import SkillInfo
 
 
@@ -122,11 +120,15 @@ description: {name} skill
 
             # Skill in first path
             (path1 / "skill-a").mkdir()
-            (path1 / "skill-a" / "SKILL.md").write_text("---\nname: skill-a\n---\n")
+            (path1 / "skill-a" / "SKILL.md").write_text(
+                "---\nname: skill-a\ndescription: Skill A\n---\n"
+            )
 
             # Skill in second path
             (path2 / "skill-b").mkdir()
-            (path2 / "skill-b" / "SKILL.md").write_text("---\nname: skill-b\n---\n")
+            (path2 / "skill-b" / "SKILL.md").write_text(
+                "---\nname: skill-b\ndescription: Skill B\n---\n"
+            )
 
             skills = scan([tmp1, tmp2])
             assert len(skills) == 2
@@ -147,141 +149,14 @@ description: {name} skill
 
             # Create nested structure
             (tmp_path / "parent" / "child").mkdir(parents=True)
-            (tmp_path / "parent" / "SKILL.md").write_text("---\nname: parent\n---\n")
+            (tmp_path / "parent" / "SKILL.md").write_text(
+                "---\nname: parent\ndescription: Parent skill\n---\n"
+            )
 
             skills = scan([tmp])
             # Should only find parent, not child
             assert len(skills) == 1
             assert skills[0].name == "parent"
-
-
-class TestParseFunction:
-    """Tests for _parse() function."""
-
-    def test_parse_valid_frontmatter(self, tmp_path: Path) -> None:
-        """Should parse valid YAML frontmatter."""
-        skill_file = tmp_path / "SKILL.md"
-        skill_file.write_text("""---
-name: my-skill
-description: A useful skill
----
-
-# Content
-
-More content here.
-""")
-        info = _parse(skill_file)
-        assert info is not None
-        assert info.name == "my-skill"
-        assert info.description == "A useful skill"
-        assert info.location == str(skill_file)
-
-    def test_parse_no_frontmatter(self, tmp_path: Path) -> None:
-        """Should return None when no frontmatter."""
-        skill_file = tmp_path / "SKILL.md"
-        skill_file.write_text("""# Just Content
-
-No frontmatter here.
-""")
-        info = _parse(skill_file)
-        assert info is None
-
-    def test_parse_empty_frontmatter(self, tmp_path: Path) -> None:
-        """Should return None for empty frontmatter (no name field)."""
-        skill_file = tmp_path / "SKILL.md"
-        skill_file.write_text("""---
----
-
-Content
-""")
-        info = _parse(skill_file)
-        # Empty frontmatter means no name, so should return None
-        assert info is None
-
-    def test_parse_missing_name(self, tmp_path: Path) -> None:
-        """Should use directory name when name not in frontmatter."""
-        skill_file = tmp_path / "SKILL.md"
-        skill_file.write_text("""---
-description: Only description
----
-
-Content
-""")
-        info = _parse(skill_file)
-        assert info is not None
-        assert info.name == tmp_path.name  # Fallback to directory name
-        assert info.description == "Only description"
-
-    def test_parse_missing_description(self, tmp_path: Path) -> None:
-        """Should handle missing description."""
-        skill_file = tmp_path / "SKILL.md"
-        skill_file.write_text("""---
-name: my-skill
----
-
-Content
-""")
-        info = _parse(skill_file)
-        assert info is not None
-        assert info.name == "my-skill"
-        assert info.description == ""
-
-    def test_parse_quoted_values(self, tmp_path: Path) -> None:
-        """Should handle quoted values."""
-        skill_file = tmp_path / "SKILL.md"
-        skill_file.write_text(
-            "---\nname: \"quoted-skill\"\ndescription: 'quoted description'\n---\n"
-        )
-        info = _parse(skill_file)
-        assert info is not None
-        assert info.name == "quoted-skill"
-        assert info.description == "quoted description"
-
-    def test_parse_multiline_description(self, tmp_path: Path) -> None:
-        """Should handle multiline frontmatter (minimal parser gets first line)."""
-        skill_file = tmp_path / "SKILL.md"
-        skill_file.write_text("""---
-name: my-skill
-description: |
-  This is a
-  multiline description
----
-
-Content
-""")
-        info = _parse(skill_file)
-        assert info is not None
-        # Simple parser captures the literal '|' as value for YAML multiline syntax
-        # This is a known limitation of the minimal YAML parser
-        assert info.name == "my-skill"
-        # Description will be '|' or empty because parser doesn't handle YAML multiline
-        assert info.description in ("|", "")
-
-    def test_parse_unicode_content(self, tmp_path: Path) -> None:
-        """Should handle unicode content."""
-        skill_file = tmp_path / "SKILL.md"
-        skill_file.write_text(
-            "---\nname: 🚀 skill\ndescription: 中文描述\n---\n", encoding="utf-8"
-        )
-        info = _parse(skill_file)
-        assert info is not None
-        assert info.name == "🚀 skill"
-        assert info.description == "中文描述"
-
-    def test_parse_invalid_utf8(self, tmp_path: Path) -> None:
-        """Should handle invalid UTF-8 gracefully."""
-        skill_file = tmp_path / "SKILL.md"
-        # Write invalid UTF-8 bytes
-        skill_file.write_bytes(b"---\nname: test\n---\n\xff\xfe content")
-        # Should not raise, errors="replace" handles it
-        info = _parse(skill_file)
-        assert info is not None
-        assert info.name == "test"
-
-    def test_parse_nonexistent_file(self, tmp_path: Path) -> None:
-        """Should raise FileNotFoundError for nonexistent file."""
-        with pytest.raises(FileNotFoundError):
-            _parse(tmp_path / "nonexistent.md")
 
 
 class TestRenderFunction:

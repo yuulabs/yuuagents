@@ -9,9 +9,12 @@ import re
 import pytest
 import yuutools as yt
 
+from yuuagents.context import AgentContext, DelegateDepthExceededError
 from yuuagents.tools import BUILTIN_TOOLS, get
 from yuuagents.tools.bash import execute_bash
+from yuuagents.tools.delegate import delegate
 from yuuagents.tools.file import _write_file_patch, delete_file, read_file, write_file
+from yuuagents.tools.skill_cli import execute_skill_cli
 from yuuagents.tools.user_input import user_input
 from yuuagents.tools.web import web_search
 
@@ -23,6 +26,8 @@ class TestBuiltinToolsRegistry:
         """Registry should contain all expected tools."""
         expected = {
             "execute_bash",
+            "execute_skill_cli",
+            "delegate",
             "read_file",
             "write_file",
             "delete_file",
@@ -41,6 +46,11 @@ class TestBuiltinToolsRegistry:
         """execute_bash should be in registry."""
         assert "execute_bash" in BUILTIN_TOOLS
         assert BUILTIN_TOOLS["execute_bash"] is execute_bash
+
+    def test_execute_skill_cli_in_registry(self) -> None:
+        """execute_skill_cli should be in registry."""
+        assert "execute_skill_cli" in BUILTIN_TOOLS
+        assert BUILTIN_TOOLS["execute_skill_cli"] is execute_skill_cli
 
     def test_read_file_in_registry(self) -> None:
         """read_file should be in registry."""
@@ -66,6 +76,11 @@ class TestBuiltinToolsRegistry:
         """user_input should be in registry."""
         assert "user_input" in BUILTIN_TOOLS
         assert BUILTIN_TOOLS["user_input"] is user_input
+
+    def test_delegate_in_registry(self) -> None:
+        """delegate should be in registry."""
+        assert "delegate" in BUILTIN_TOOLS
+        assert BUILTIN_TOOLS["delegate"] is delegate
 
 
 class TestGetFunction:
@@ -125,6 +140,73 @@ class TestExecuteBashTool:
         assert isinstance(execute_bash, yt.Tool)
 
 
+class TestExecuteSkillCliTool:
+    """Tests for execute_skill_cli tool."""
+
+    def test_is_tool_instance(self) -> None:
+        """Should be a Tool instance."""
+        assert isinstance(execute_skill_cli, yt.Tool)
+
+
+@pytest.mark.asyncio
+async def test_execute_skill_cli_allows_simple_command(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ctx = AgentContext(
+        task_id="t1",
+        agent_id="main",
+        workdir=str(tmp_path),
+        docker_container="c1",
+    )
+    bound = execute_skill_cli.bind(ctx)
+    out = await bound.run(command="/usr/bin/echo hello", timeout=10)
+    assert "hello" in out
+    assert "__YAGENTS_EXIT_CODE__" not in out
+
+
+@pytest.mark.asyncio
+async def test_execute_skill_cli_inherits_process_env(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("YAGENTS_SKILL_CLI_ENV_TEST", "hello123")
+    ctx = AgentContext(
+        task_id="t1",
+        agent_id="main",
+        workdir=str(tmp_path),
+        docker_container="c1",
+    )
+    bound = execute_skill_cli.bind(ctx)
+    out = await bound.run(command="/usr/bin/env", timeout=10)
+    assert "YAGENTS_SKILL_CLI_ENV_TEST=hello123" in out
+    assert "__YAGENTS_EXIT_CODE__" not in out
+
+
+@pytest.mark.asyncio
+async def test_execute_skill_cli_blocks_rm(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ctx = AgentContext(
+        task_id="t1",
+        agent_id="main",
+        workdir=str(tmp_path),
+        docker_container="c1",
+    )
+    bound = execute_skill_cli.bind(ctx)
+    with pytest.raises(ValueError, match="dangerous command"):
+        await bound.run(command="rm -rf .", timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_execute_skill_cli_blocks_shell_operators(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ctx = AgentContext(
+        task_id="t1",
+        agent_id="main",
+        workdir=str(tmp_path),
+        docker_container="c1",
+    )
+    bound = execute_skill_cli.bind(ctx)
+    with pytest.raises(ValueError, match="operators"):
+        await bound.run(command="git status && echo hi", timeout=10)
+
+
 class TestReadFileTool:
     """Tests for read_file tool."""
 
@@ -155,6 +237,35 @@ class TestWebSearchTool:
     def test_is_tool_instance(self) -> None:
         """Should be a Tool instance."""
         assert isinstance(web_search, yt.Tool)
+
+
+@pytest.mark.asyncio
+async def test_delegate_depth_limit_raises_custom_error() -> None:
+    class FakeManager:
+        async def delegate(
+            self,
+            *,
+            agent: str,
+            first_user_message: str,
+            tools: list[str] | None,
+            delegate_depth: int,
+        ) -> str:
+            return "ok"
+
+    ctx = AgentContext(
+        task_id="t1",
+        agent_id="main",
+        workdir="/tmp",
+        docker_container="c1",
+        delegate_depth=3,
+        manager=FakeManager(),
+    )
+    bound = delegate.bind(ctx)
+    with pytest.raises(DelegateDepthExceededError) as exc_info:
+        await bound.run(agent="coder", context="x", task="y")
+    msg = str(exc_info.value)
+    assert "delegate depth limit exceeded" in msg
+    assert "max_depth=3" in msg
 
 
 class _FakeDocker:
@@ -302,3 +413,95 @@ async def test_write_file_noop_patch_returns_noop_summary() -> None:
     )
     assert docker.content == "a\nb\n"
     assert "no-op" in summary
+
+
+# ── cli_guard integration tests ──────────────────────────────────────────────
+
+
+@pytest.fixture()
+def recording_guard():
+    """Guard that records calls and allows everything."""
+    calls: list[list[str]] = []
+
+    def _guard(argv: list[str]) -> None:
+        calls.append(argv)
+
+    return _guard, calls
+
+
+@pytest.fixture()
+def blocking_guard():
+    """Guard that always rejects."""
+
+    def _guard(argv: list[str]) -> None:
+        raise ValueError("blocked by guard")
+
+    return _guard
+
+
+class TestCliGuard:
+    @pytest.mark.asyncio
+    async def test_guard_receives_correct_argv(
+        self, tmp_path, monkeypatch, recording_guard
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        guard, calls = recording_guard
+        ctx = AgentContext(
+            task_id="t1",
+            agent_id="main",
+            workdir=str(tmp_path),
+            docker_container="c1",
+            cli_guard=guard,
+        )
+        bound = execute_skill_cli.bind(ctx)
+        await bound.run(command="cat SKILL.md", timeout=5)
+        assert len(calls) == 1
+        assert calls[0] == ["cat", "SKILL.md"]
+
+    @pytest.mark.asyncio
+    async def test_guard_blocks_execution(
+        self, tmp_path, monkeypatch, blocking_guard
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        ctx = AgentContext(
+            task_id="t1",
+            agent_id="main",
+            workdir=str(tmp_path),
+            docker_container="c1",
+            cli_guard=blocking_guard,
+        )
+        bound = execute_skill_cli.bind(ctx)
+        with pytest.raises(ValueError, match="blocked by guard"):
+            await bound.run(command="cat SKILL.md", timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_no_guard_does_not_block(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        ctx = AgentContext(
+            task_id="t1",
+            agent_id="main",
+            workdir=str(tmp_path),
+            docker_container="c1",
+            cli_guard=None,
+        )
+        bound = execute_skill_cli.bind(ctx)
+        result = await bound.run(command="/usr/bin/echo hello", timeout=5)
+        assert "hello" in result
+
+    @pytest.mark.asyncio
+    async def test_blacklist_before_guard(
+        self, tmp_path, monkeypatch, recording_guard
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        guard, calls = recording_guard
+        ctx = AgentContext(
+            task_id="t1",
+            agent_id="main",
+            workdir=str(tmp_path),
+            docker_container="c1",
+            cli_guard=guard,
+        )
+        bound = execute_skill_cli.bind(ctx)
+        with pytest.raises(ValueError, match="dangerous command"):
+            await bound.run(command="rm -rf /tmp/foo", timeout=5)
+        assert len(calls) == 0

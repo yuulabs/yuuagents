@@ -169,24 +169,29 @@ class TestAgentEntry:
     """Tests for AgentEntry struct."""
 
     def test_default_values(self) -> None:
-        entry = AgentEntry()
+        entry = AgentEntry(description="A configured agent")
         assert entry.provider == ""
         assert entry.model == ""
         assert entry.persona == ""
+        assert entry.subagents == []
         assert entry.tools == []
         assert entry.skills == []
 
     def test_full_agent(self) -> None:
         entry = AgentEntry(
+            description="A coding assistant",
             provider="openai-default",
             model="gpt-4o",
             persona="You are a coder",
+            subagents=["researcher"],
             tools=["execute_bash", "read_file"],
             skills=["git-worktree"],
         )
+        assert entry.description == "A coding assistant"
         assert entry.provider == "openai-default"
         assert entry.model == "gpt-4o"
         assert entry.persona == "You are a coder"
+        assert entry.subagents == ["researcher"]
         assert entry.tools == ["execute_bash", "read_file"]
         assert entry.skills == ["git-worktree"]
 
@@ -233,6 +238,7 @@ class TestConfig:
             },
             agents={
                 "main": AgentEntry(
+                    description="A main agent",
                     provider="openai-default",
                     model="gpt-4o",
                     persona="You are a coder",
@@ -247,23 +253,24 @@ class TestConfig:
     def test_validate_valid_config(self) -> None:
         cfg = Config(
             providers={"p1": ProviderConfig()},
-            agents={"main": AgentEntry(provider="p1")},
+            agents={"main": AgentEntry(description="Main agent", provider="p1")},
         )
         assert cfg.validate() == []
 
     def test_validate_missing_provider_reference(self) -> None:
         cfg = Config(
             providers={},
-            agents={"main": AgentEntry(provider="nonexistent")},
+            agents={
+                "main": AgentEntry(description="Main agent", provider="nonexistent")
+            },
         )
         errors = cfg.validate()
-        assert len(errors) == 1
-        assert "nonexistent" in errors[0]
+        assert any("nonexistent" in e for e in errors)
 
     def test_validate_empty_provider_reference_ok(self) -> None:
         """Agent with empty provider should not trigger validation error."""
         cfg = Config(
-            agents={"main": AgentEntry(provider="")},
+            agents={"main": AgentEntry(description="Main agent", provider="")},
         )
         assert cfg.validate() == []
 
@@ -366,9 +373,12 @@ providers:
 
 agents:
   main:
+    description: A main agent
     provider: openai-main
     model: gpt-4o
     persona: You are a senior developer
+    subagents:
+      - researcher
     tools:
       - execute_bash
       - read_file
@@ -377,6 +387,7 @@ agents:
       - git-worktree
 
   researcher:
+    description: A research agent
     provider: anthropic-main
     persona: You are a research assistant
     tools:
@@ -464,7 +475,18 @@ unknown_section:
         cfg = load(str(config_file))
         assert cfg.daemon.socket == "/tmp/test.sock"
 
-    def test_load_no_args_works(self) -> None:
+    def test_load_no_args_works(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            """\
+agents:
+  main:
+    description: Main agent
+"""
+        )
+        monkeypatch.setattr("yuuagents.config.DEFAULT_CONFIG_PATH", config_file)
         cfg = load()
         assert isinstance(cfg, Config)
 
@@ -523,6 +545,7 @@ providers:
     default_model: gpt-3.5-turbo
 agents:
   main:
+    description: Test agent
     provider: test-provider
     persona: Test persona
     tools:

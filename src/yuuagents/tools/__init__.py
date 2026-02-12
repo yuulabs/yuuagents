@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from yuuagents.tools.bash import execute_bash
+from yuuagents.tools.delegate import delegate
 from yuuagents.tools.file import delete_file, read_file, write_file
+from yuuagents.tools.skill_cli import execute_skill_cli
 from yuuagents.tools.user_input import user_input
 from yuuagents.tools.web import web_search
 
 BUILTIN_TOOLS = {
     "execute_bash": execute_bash,
+    "execute_skill_cli": execute_skill_cli,
+    "delegate": delegate,
     "read_file": read_file,
     "write_file": write_file,
     "delete_file": delete_file,

@@ -53,10 +53,7 @@ def runtime_image_tag() -> str:
 
 def _runtime_dockerfile_text() -> str:
     dockerfile_path = Path(__file__).resolve().parent / "daemon" / "runtime.Dockerfile"
-    try:
-        return dockerfile_path.read_text(encoding="utf-8")
-    except Exception:
-        return _FALLBACK_RUNTIME_DOCKERFILE
+    return dockerfile_path.read_text(encoding="utf-8")
 
 
 def build_runtime_image(tag: str | None = None) -> bool:
@@ -275,31 +272,3 @@ async def setup(config: str | Path | Config) -> Config:
 
     return cfg
 
-
-# ---------------------------------------------------------------------------
-# Fallback Dockerfile (kept in sync with daemon/runtime.Dockerfile)
-# ---------------------------------------------------------------------------
-
-_FALLBACK_RUNTIME_DOCKERFILE = """\
-FROM ubuntu:24.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN set -eux; \\
-    for i in 1 2 3; do \\
-        apt-get update -y \\
-        && apt-get install -y --no-install-recommends --fix-missing \\
-            bash \\
-            ca-certificates \\
-            coreutils \\
-            diffutils \\
-            findutils \\
-            gawk \\
-            patch \\
-            sed \\
-            tmux \\
-        && break; \\
-        sleep 2; \\
-    done; \\
-    rm -rf /var/lib/apt/lists/*
-"""

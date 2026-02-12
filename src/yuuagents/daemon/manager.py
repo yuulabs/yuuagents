@@ -18,7 +18,7 @@ from attrs import define, field
 
 from yuuagents.agent import Agent, AgentConfig, SimplePromptBuilder
 from yuuagents.config import Config, ProviderConfig
-from yuuagents.context import AgentContext
+from yuuagents.context import AgentContext, DelegateDepthExceededError
 from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT, DockerManager
 from yuuagents.loop import run as run_agent
 from yuuagents.persistence import TaskPersistence, TaskRecorder, TaskWriter
@@ -70,7 +70,7 @@ class AgentManager:
 
     # -- agent lifecycle --
 
-    async def submit(self, req: TaskRequest) -> str:
+    async def submit(self, req: TaskRequest, *, delegate_depth: int = 0) -> str:
         task_id = uuid4().hex
         agent_id = req.agent
 
@@ -104,6 +104,9 @@ class AgentManager:
         # Build prompt using the builder pattern
         prompt_builder = SimplePromptBuilder()
         prompt_builder.add_section(persona_text)
+        agents_prompt = self._default_agents_prompt(agent_id=agent_id)
+        if agents_prompt:
+            prompt_builder.add_section(agents_prompt)
         if DOCKER_SYSTEM_PROMPT:
             prompt_builder.add_section(DOCKER_SYSTEM_PROMPT)
         if skills_xml:
@@ -125,6 +128,8 @@ class AgentManager:
             agent_id=agent_id,
             workdir=self.docker.workdir,
             docker_container=container_id,
+            delegate_depth=delegate_depth,
+            manager=self,
             docker=self.docker,
             state=agent.state,
             tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
@@ -148,6 +153,70 @@ class AgentManager:
         task = asyncio.create_task(self._run(agent, req.task, ctx, resume=False))
         self._tasks[task_id] = task
         return task_id
+
+    async def delegate(
+        self,
+        *,
+        caller_agent: str,
+        agent: str,
+        first_user_message: str,
+        tools: list[str] | None,
+        delegate_depth: int,
+    ) -> str:
+        if delegate_depth > 3:
+            raise DelegateDepthExceededError(
+                max_depth=3,
+                current_depth=delegate_depth,
+                target_agent=agent,
+            )
+        assert delegate_depth >= 0
+        assert isinstance(caller_agent, str)
+        caller_agent = caller_agent.strip()
+        assert caller_agent
+        assert isinstance(agent, str)
+        agent = agent.strip()
+        assert agent
+        assert isinstance(first_user_message, str)
+        first_user_message = first_user_message.strip()
+        assert first_user_message
+        if tools is not None:
+            assert isinstance(tools, list)
+            assert all(isinstance(t, str) and t.strip() for t in tools)
+
+        caller_entry = self.config.agents.get(caller_agent)
+        if caller_entry is None:
+            raise RuntimeError(
+                f"delegation denied: caller agent {caller_agent!r} is not configured"
+            )
+        if agent not in self.config.agents:
+            raise RuntimeError(
+                f"delegation denied: target agent {agent!r} is not configured"
+            )
+        allowed = caller_entry.subagents
+        if not allowed:
+            raise RuntimeError(
+                f"delegation denied: agent {caller_agent!r} has no subagents configured"
+            )
+        if "*" not in allowed and agent not in allowed:
+            raise RuntimeError(
+                f"delegation denied: agent {caller_agent!r} cannot delegate to {agent!r}"
+            )
+        if agent == caller_agent:
+            raise RuntimeError("delegation denied: cannot delegate to self")
+
+        req = TaskRequest(
+            agent=agent,
+            task=first_user_message,
+            tools=(tools if tools is not None else []),
+        )
+        task_id = await self.submit(req, delegate_depth=delegate_depth)
+        await self._tasks[task_id]
+        delegated = self._agents[task_id]
+        if delegated.status == AgentStatus.ERROR:
+            raise RuntimeError(f"delegated agent {agent!r} failed")
+        if delegated.status == AgentStatus.CANCELLED:
+            raise RuntimeError(f"delegated agent {agent!r} cancelled")
+        return self._last_assistant_text(delegated)
 
     async def _run(
         self, agent: Agent, task: str, ctx: AgentContext, *, resume: bool
@@ -286,6 +355,49 @@ class AgentManager:
             self._skills = discovery.scan(self.config.skills.paths)
 
     # -- private helpers --
+    def _default_agents_prompt(self, *, agent_id: str) -> str:
+        if not self.config.agents:
+            return ""
+        assert isinstance(agent_id, str)
+        agent_id = agent_id.strip()
+        assert agent_id
+
+        entry = self.config.agents.get(agent_id)
+        if entry is None:
+            return ""
+        allowed = entry.subagents
+        if not allowed:
+            return ""
+
+        if "*" in allowed:
+            names = [n for n in sorted(self.config.agents) if n != agent_id]
+        else:
+            seen: set[str] = set()
+            names = []
+            for n in allowed:
+                if n in seen or n == agent_id:
+                    continue
+                seen.add(n)
+                if n in self.config.agents:
+                    names.append(n)
+
+        if not names:
+            return ""
+
+        parts: list[str] = [
+            "<agents>",
+            "以下是其他可调用的 Agent（不是你自己）。需要时使用 delegate 工具调用。",
+        ]
+        for name in names:
+            other = self.config.agents[name]
+            desc = other.description.strip()
+            desc = " ".join(desc.split())
+            if len(desc) > 200:
+                desc = desc[:197] + "..."
+            parts.append(f"- name: {name}\n- description: {desc}")
+        parts.append("</agents>")
+        return "\n".join(parts)
+
     def _get_recorder(self, task_id: str) -> TaskRecorder | None:
         if self._writer is None:
             return None
@@ -363,6 +475,8 @@ class AgentManager:
                 agent_id=t.agent_id,
                 workdir=self.docker.workdir,
                 docker_container=container_id,
+                delegate_depth=0,
+                manager=self,
                 docker=self.docker,
                 state=agent.state,
                 tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
@@ -403,6 +517,27 @@ class AgentManager:
             if tool_names:
                 return "\n".join(f"tool_call: {n}" for n in tool_names)
             return ""
+        return ""
+
+    @staticmethod
+    def _last_assistant_text(agent: Agent) -> str:
+        for msg in reversed(agent.history):
+            role: str | None = None
+            items: list[Any] | None = None
+
+            if isinstance(msg, tuple) and len(msg) == 2:
+                role, items = msg
+
+            if role != "assistant" or not isinstance(items, list):
+                continue
+
+            text_parts: list[str] = []
+            for item in items:
+                if isinstance(item, str):
+                    text_parts.append(item)
+            text = "".join(text_parts).strip()
+            if text:
+                return text
         return ""
 
     def _info(self, agent: Agent) -> AgentInfo:
@@ -557,6 +692,7 @@ class AgentManager:
             return entry.tools
         return [
             "execute_bash",
+            "delegate",
             "read_file",
             "write_file",
             "delete_file",
@@ -616,6 +752,8 @@ class AgentManager:
             agent_id=row.agent_id,
             workdir=self.docker.workdir,
             docker_container=container_id,
+            delegate_depth=0,
+            manager=self,
             docker=self.docker,
             state=agent.state,
             tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),

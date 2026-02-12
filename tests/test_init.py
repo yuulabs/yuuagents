@@ -176,6 +176,7 @@ class TestSetup:
             },
             agents={
                 "main": AgentEntry(
+                    description="A minimal main agent",
                     provider="test",
                     model="gpt-4o",
                 )
@@ -288,7 +289,9 @@ class TestSetup:
     async def test_raises_on_invalid_config(self, mock_home: Path) -> None:
         cfg = Config(
             providers={"test": ProviderConfig()},
-            agents={"main": AgentEntry(provider="nonexistent")},
+            agents={
+                "main": AgentEntry(description="Main agent", provider="nonexistent")
+            },
         )
         with pytest.raises(ValueError, match="validation failed"):
             await setup(cfg)

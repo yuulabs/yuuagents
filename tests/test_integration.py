@@ -13,7 +13,7 @@ import yuutrace as ytrace
 import yuutools as yt
 
 from yuuagents.agent import Agent, AgentConfig, SimplePromptBuilder
-from yuuagents.config import Config, load as load_config
+from yuuagents.config import AgentEntry, Config, load as load_config
 from yuuagents.context import AgentContext
 from yuuagents.daemon.docker import DockerManager
 from yuuagents.daemon.manager import AgentManager
@@ -234,6 +234,8 @@ class TestToolIntegration:
         """Should have all expected tools in registry."""
         expected = {
             "execute_bash",
+            "execute_skill_cli",
+            "delegate",
             "read_file",
             "write_file",
             "delete_file",
@@ -242,6 +244,51 @@ class TestToolIntegration:
         }
         actual = set(BUILTIN_TOOLS.keys())
         assert actual == expected
+
+    def test_default_agents_in_system_prompt(self) -> None:
+        cfg = Config(
+            agents={
+                "main": AgentEntry(
+                    description="A primary agent",
+                    persona="Main persona",
+                    subagents=["coder"],
+                ),
+                "coder": AgentEntry(
+                    description="A coding agent",
+                    persona="Coder persona",
+                ),
+            }
+        )
+        mgr = AgentManager(config=cfg, docker=DockerManager())
+        prompt = mgr._default_agents_prompt(agent_id="main")
+        assert "<agents>" in prompt
+        assert "</agents>" in prompt
+        assert "- name: coder" in prompt
+        assert "description: A coding agent" in prompt
+
+    @pytest.mark.asyncio
+    async def test_delegate_denied_without_subagents(self) -> None:
+        cfg = Config(
+            agents={
+                "main": AgentEntry(
+                    description="A primary agent",
+                    persona="Main persona",
+                ),
+                "coder": AgentEntry(
+                    description="A coding agent",
+                    persona="Coder persona",
+                ),
+            }
+        )
+        mgr = AgentManager(config=cfg, docker=DockerManager())
+        with pytest.raises(RuntimeError, match="delegation denied"):
+            await mgr.delegate(
+                caller_agent="main",
+                agent="coder",
+                first_user_message="test",
+                tools=None,
+                delegate_depth=0,
+            )
 
     def test_get_tools(self) -> None:
         """Should retrieve tools from registry."""
