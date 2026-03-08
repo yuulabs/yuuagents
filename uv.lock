@@ -1265,7 +1265,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "yuullm", specifier = ">=0.3.1" },
     { name = "yuutools", specifier = ">=0.1.0" },
-    { name = "yuutrace", specifier = ">=0.1.6" },
+    { name = "yuutrace", specifier = ">=0.1.11" },
 ]
 
 [package.metadata.requires-dev]
@@ -1280,7 +1280,7 @@ examples = [{ name = "rich", specifier = ">=13.0.0" }]
 
 [[package]]
 name = "yuullm"
-version = "0.3.1"
+version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
@@ -1289,9 +1289,9 @@ dependencies = [
     { name = "openai" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f3/da/f4d0886fe18f926e1203a99a1cc396c5f3923df5a718fced2d4ab8b19adc/yuullm-0.3.1.tar.gz", hash = "sha256:952e9606fae9875cb5174b4a2dd28982cf6678d91cb76dcf02d1ee3fe9c1a57f", size = 13008, upload-time = "2026-02-08T14:18:49.18Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e2/f3/13df41adcb2bba1a2fe39cca310a8c43cf81ad57111d139d4fa3bf21351c/yuullm-0.4.2.tar.gz", hash = "sha256:b56d2849becb939d3777c278e5302925197db716cd35c24af977a93a00bc430f", size = 13799, upload-time = "2026-03-08T09:11:18.192Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ce/bb/039df6a9c75f3dc4a59e19aa496f1d49de0520ba2551153bd5fe67fd2095/yuullm-0.3.1-py3-none-any.whl", hash = "sha256:bdb55bc57bc68c2c9af4596081b8f7a28e3830be1d38db1a55535a4f5d16e2b8", size = 17895, upload-time = "2026-02-08T14:18:48.109Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/19/17979cea1ba549832c88874962444a5d9eb0ecc3b30717409456de05f03a/yuullm-0.4.2-py3-none-any.whl", hash = "sha256:1504a8fcffe2d6cd2461e62b554cfa409ca411617a883fb09e8a7faa2ed8f551", size = 18759, upload-time = "2026-03-08T09:11:17.196Z" },
 ]
 
 [[package]]
@@ -1309,7 +1309,7 @@ wheels = [
 
 [[package]]
 name = "yuutrace"
-version = "0.1.6"
+version = "0.1.11"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "msgspec" },
@@ -1319,9 +1319,9 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e5/28/862866100bf04762554a50c1b25ebf9baebea9302e8fbdc55853ccf36355/yuutrace-0.1.6.tar.gz", hash = "sha256:9337115c5a7d93582a613dae3d3fdea99145a90bee1653ade53b74f49f58defe", size = 84971, upload-time = "2026-02-11T12:46:18.177Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ac/4c/eec507eaf60128c8611cc8101e6962a253727e4bab71799f073a19d76cb7/yuutrace-0.1.11.tar.gz", hash = "sha256:655619d370c0edb1d85025a0984fb26d18bb7552e71523795f7810d4aa244531", size = 88632, upload-time = "2026-02-17T15:02:04.956Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e4/54/e65ff5b34b67f1f7bb0c3ea9212d9a24af62a83a66d172b243c9ef27c687/yuutrace-0.1.6-py3-none-any.whl", hash = "sha256:78e85b7a9594b6a8237817ac6a73236b1853fb99261b2d7edebf298f2736e860", size = 91226, upload-time = "2026-02-11T12:46:16.437Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/a6/dcb05ede95af6cbd278a71a9b935e38b00f53bf60f4b0a8867da2ac46876/yuutrace-0.1.11-py3-none-any.whl", hash = "sha256:59dd899d1eab2c9baf404218f21145e74603d3a857d327795c4c462ccca16813", size = 94871, upload-time = "2026-02-17T15:02:03.197Z" },
 ]
 
 [[package]]
