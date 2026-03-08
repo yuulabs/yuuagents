@@ -30,11 +30,12 @@ def _proxy_env() -> dict[str, str]:
 # Injected into every agent's system prompt so it knows the mount layout.
 DOCKER_SYSTEM_PROMPT = """\
 <docker_environment>
-You are running commands inside a Docker container.
+You are running commands inside a Docker container as root.
 - The host filesystem root is mounted read-only at /mnt/host
 - Your home directory /home/yuu is a persistent read-write workspace
   (backed by a host directory specific to this container)
 - You can read any host file via /mnt/host/... but cannot modify the host directly.
+- You have full root access: install packages with apt, npm, etc. directly.
 </docker_environment>"""
 
 
@@ -493,7 +494,7 @@ echo "$missing"
             "Tty": False,
             "Env": env_list,
             "WorkingDir": container_home,
-            "User": self._user_spec(),
+            "User": "0:0",
             "HostConfig": {
                 "Binds": [
                     "/:/mnt/host:ro",

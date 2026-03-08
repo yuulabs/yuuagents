@@ -36,8 +36,6 @@ RUN set -eux; \
             jq \
             less \
             make \
-            nodejs \
-            npm \
             openssh-client \
             patch \
             python3 \
@@ -54,6 +52,11 @@ RUN set -eux; \
         sleep 2; \
     done; \
     rm -rf /var/lib/apt/lists/*
+
+# -- Node.js 22.x (LTS) via nodesource -------------------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
 # -- uv (Python package manager) -------------------------------------------
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
@@ -123,7 +126,7 @@ BEGIN { done_old=0; done_new=0 }
 }
 ' "$patch_raw" > "$patch_rewritten"
 
-patch -p0 -u -N --silent < "$patch_rewritten"
+patch -p0 -u -N --silent --unsafe-paths < "$patch_rewritten"
 code=$?
 if [ "$code" -ne 0 ]; then
   echo "patch failed (exit=$code)"
@@ -166,3 +169,7 @@ exit 0
 EOF
 
 RUN chmod +x /usr/local/bin/yagents-apply-patch
+
+# -- background CLI (long-running tasks in containers) -------------------------
+COPY background_cli.py /usr/local/bin/background
+RUN chmod +x /usr/local/bin/background
