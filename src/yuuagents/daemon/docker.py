@@ -10,11 +10,15 @@ import re
 import shlex
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiodocker
 from aiodocker.exceptions import DockerError
 from attrs import define, field
 from loguru import logger
+
+if TYPE_CHECKING:
+    from yuuagents.running_tools import OutputBuffer
 
 _DOCKERS_ROOT = Path("~/.yagents/dockers").expanduser()
 
@@ -216,7 +220,9 @@ class DockerManager:
             except Exception:
                 pass
 
-        async def _read_all() -> bytes:
+        async def _read_all(
+            output_buffer: OutputBuffer | None = None,
+        ) -> bytes:
             chunks: list[bytes] = []
             try:
                 while True:
@@ -226,6 +232,8 @@ class DockerManager:
                     data = getattr(msg, "data", b"")
                     if data:
                         chunks.append(data)
+                        if output_buffer is not None:
+                            output_buffer.write(data)
             finally:
                 await _close_stream()
             return b"".join(chunks)

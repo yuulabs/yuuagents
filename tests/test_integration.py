@@ -241,6 +241,15 @@ class TestToolIntegration:
             "delete_file",
             "user_input",
             "web_search",
+            "launch_agent",
+            "session_poll",
+            "session_interrupt",
+            "session_result",
+            "sleep",
+            "view_image",
+            "check_running_tool",
+            "cancel_running_tool",
+            "update_todo",
         }
         actual = set(BUILTIN_TOOLS.keys())
         assert actual == expected

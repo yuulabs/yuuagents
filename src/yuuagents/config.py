@@ -98,6 +98,8 @@ class AgentEntry(msgspec.Struct, kw_only=True):
     model: str = ""
     persona: str = ""
     max_steps: int = 0  # 0 = unlimited
+    soft_timeout: float = 0  # 0 = disabled
+    silence_timeout: float = 0  # 0 = disabled
     subagents: list[str] = msgspec.field(default_factory=list)
     tools: list[str] = msgspec.field(default_factory=list)
     skills: list[str] = msgspec.field(default_factory=list)

@@ -19,6 +19,7 @@ from attrs import define, field
 from yuuagents.agent import Agent, AgentConfig, SimplePromptBuilder
 from yuuagents.config import Config, ProviderConfig
 from yuuagents.context import AgentContext, DelegateDepthExceededError
+from yuuagents.prompts import get_vars as get_prompt_vars
 from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT, DockerManager
 from yuuagents.loop import run as run_agent
 from yuuagents.persistence import TaskPersistence, TaskRecorder, TaskWriter
@@ -91,6 +92,10 @@ class AgentManager:
             or (agent_entry.persona if agent_entry and agent_entry.persona else "")
             or agent_id
         )
+        # Apply {var} substitution (e.g. {background_cli_prompt})
+        prompt_vars = get_prompt_vars()
+        for key, value in prompt_vars.items():
+            persona_text = persona_text.replace(f"{{{key}}}", value)
         skills_xml = self._resolve_skills(
             req.skills if req.skills else (agent_entry.skills if agent_entry else [])
         )
@@ -120,6 +125,8 @@ class AgentManager:
             tools=manager,
             llm=llm_client,
             prompt_builder=prompt_builder,
+            soft_timeout=(agent_entry.soft_timeout or None) if agent_entry else None,
+            silence_timeout=(agent_entry.silence_timeout or None) if agent_entry else None,
         )
         agent = Agent(config=config)
 

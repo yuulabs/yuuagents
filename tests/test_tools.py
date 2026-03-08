@@ -33,6 +33,15 @@ class TestBuiltinToolsRegistry:
             "delete_file",
             "user_input",
             "web_search",
+            "launch_agent",
+            "session_poll",
+            "session_interrupt",
+            "session_result",
+            "sleep",
+            "view_image",
+            "check_running_tool",
+            "cancel_running_tool",
+            "update_todo",
         }
         actual = set(BUILTIN_TOOLS.keys())
         assert actual == expected
@@ -194,7 +203,8 @@ async def test_execute_skill_cli_blocks_rm(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_skill_cli_blocks_shell_operators(tmp_path, monkeypatch) -> None:
+async def test_execute_skill_cli_chain_operators(tmp_path, monkeypatch) -> None:
+    """Chain operators (&&, ||, |) are allowed and executed via shell."""
     monkeypatch.setenv("HOME", str(tmp_path))
     ctx = AgentContext(
         task_id="t1",
@@ -203,8 +213,92 @@ async def test_execute_skill_cli_blocks_shell_operators(tmp_path, monkeypatch) -
         docker_container="c1",
     )
     bound = execute_skill_cli.bind(ctx)
-    with pytest.raises(ValueError, match="operators"):
-        await bound.run(command="git status && echo hi", timeout=10)
+    out = await bound.run(command="/usr/bin/echo a && /usr/bin/echo b", timeout=10)
+    assert "a" in out and "b" in out
+
+
+class TestHeredocValidation:
+    """Heredoc support in _validate_cli_command."""
+
+    def test_heredoc_basic(self):
+        """Simple heredoc should pass validation."""
+        from yuuagents.tools.skill_cli import _validate_cli_command
+
+        cmd = "ybot im send --ctx 3 << 'EOF'\n[{\"type\":\"text\",\"text\":\"hello\"}]\nEOF"
+        result = _validate_cli_command(cmd)
+        assert result is not None
+
+    def test_heredoc_with_inner_quotes(self):
+        """Heredoc body with quotes should not be rejected."""
+        from yuuagents.tools.skill_cli import _validate_cli_command
+
+        cmd = 'ybot im send --ctx 3 << \'EOF\'\n[{"type":"text","text":"他说\\"你好\\""}]\nEOF'
+        result = _validate_cli_command(cmd)
+        assert result is not None
+
+    def test_heredoc_body_not_validated_as_command(self):
+        """Heredoc body can contain forbidden programs/tokens — it's data."""
+        from yuuagents.tools.skill_cli import _validate_cli_command
+
+        # Body contains "rm", ";", "sudo" — all forbidden as commands but fine as data
+        cmd = "ybot im send --ctx 3 << 'EOF'\nrm -rf /; sudo reboot\nEOF"
+        result = _validate_cli_command(cmd)
+        assert result is not None
+
+    def test_heredoc_command_after_delimiter_rejected(self):
+        """No commands allowed after heredoc closing delimiter."""
+        from yuuagents.tools.skill_cli import _validate_cli_command
+
+        cmd = "ybot im send --ctx 3 << 'EOF'\nhello\nEOF\nrm -rf /"
+        with pytest.raises(ValueError, match="after.*heredoc"):
+            _validate_cli_command(cmd)
+
+    def test_heredoc_forbidden_program_in_command_rejected(self):
+        """The command part (before <<) is still validated."""
+        from yuuagents.tools.skill_cli import _validate_cli_command
+
+        cmd = "rm -rf / << 'EOF'\ndata\nEOF"
+        with pytest.raises(ValueError, match="dangerous command"):
+            _validate_cli_command(cmd)
+
+    def test_heredoc_unclosed_rejected(self):
+        """Heredoc without closing delimiter should be rejected."""
+        from yuuagents.tools.skill_cli import _validate_cli_command
+
+        cmd = "ybot im send --ctx 3 << 'EOF'\nhello world"
+        with pytest.raises(ValueError, match="unclosed.*heredoc"):
+            _validate_cli_command(cmd)
+
+    def test_heredoc_empty_delimiter_rejected(self):
+        """Heredoc with empty delimiter should be rejected."""
+        from yuuagents.tools.skill_cli import _validate_cli_command
+
+        cmd = "ybot im send --ctx 3 <<\nhello\n"
+        with pytest.raises(ValueError):
+            _validate_cli_command(cmd)
+
+    @pytest.mark.asyncio
+    async def test_heredoc_e2e_cat(self, tmp_path, monkeypatch):
+        """Heredoc actually pipes data to stdin of the command."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        out = await execute_skill_cli.fn(
+            command="cat << 'EOF'\nhello heredoc\nEOF",
+            timeout=5,
+            cli_guard=None,
+        )
+        assert "hello heredoc" in out
+
+    @pytest.mark.asyncio
+    async def test_heredoc_preserves_quotes(self, tmp_path, monkeypatch):
+        """Heredoc body preserves quotes intact through shell execution."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        out = await execute_skill_cli.fn(
+            command='cat << \'EOF\'\n{"key": "value with \\"quotes\\""}\nEOF',
+            timeout=5,
+            cli_guard=None,
+        )
+        assert '"key"' in out
+        assert "value with" in out
 
 
 class TestReadFileTool:

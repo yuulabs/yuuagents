@@ -49,6 +49,8 @@ class AgentConfig:
     llm: yuullm.YLLMClient
     prompt_builder: PromptBuilder
     max_steps: int = 0  # 0 = unlimited
+    soft_timeout: float | None = None  # seconds; None = disabled
+    silence_timeout: float | None = None  # seconds; None = disabled
 
 
 @define
@@ -156,7 +158,7 @@ class Agent:
             yuullm.user(task),
         ]
 
-    def fail(self, exc: Exception) -> None:
+    def fail(self, exc: BaseException) -> None:
         """Mark the agent as failed with detailed error information."""
         self.state.status = AgentStatus.ERROR
         self.state.error = ErrorInfo(
@@ -168,6 +170,14 @@ class Agent:
     @property
     def max_steps(self) -> int:
         return self.config.max_steps
+
+    @property
+    def soft_timeout(self) -> float | None:
+        return self.config.soft_timeout
+
+    @property
+    def silence_timeout(self) -> float | None:
+        return self.config.silence_timeout
 
     def done(self) -> bool:
         """Check if the agent has reached a terminal state."""

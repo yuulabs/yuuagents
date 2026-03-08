@@ -9,6 +9,7 @@ from attrs import define, field
 
 if TYPE_CHECKING:
     from yuuagents.agent import AgentState
+    from yuuagents.running_tools import OutputBuffer, RunningToolRegistry
 
 
 class DockerExecutor(Protocol):
@@ -20,6 +21,33 @@ class DockerExecutor(Protocol):
         command: str,
         timeout: int,
     ) -> str: ...
+
+
+class SessionManager(Protocol):
+    """Protocol for launching and managing agent sessions."""
+
+    async def launch(
+        self,
+        *,
+        caller_agent: str,
+        agent: str,
+        task: str,
+        context: str,
+    ) -> str:
+        """Launch an agent session, return session_id."""
+        ...
+
+    def poll(self, session_id: str) -> dict:
+        """Return {status, progress, elapsed}."""
+        ...
+
+    async def interrupt(self, session_id: str) -> str:
+        """Interrupt a session."""
+        ...
+
+    def result(self, session_id: str) -> str | None:
+        """Get final result text."""
+        ...
 
 
 class DelegateManager(Protocol):
@@ -70,5 +98,8 @@ class AgentContext:
     docker: DockerExecutor | None = None
     state: AgentState | None = None
     input_queue: asyncio.Queue[str] = field(factory=asyncio.Queue)
+    session_manager: SessionManager | None = None
     tavily_api_key: str = ""
     cli_guard: CliGuard | None = None
+    running_tools: RunningToolRegistry | None = None
+    current_output_buffer: OutputBuffer | None = None

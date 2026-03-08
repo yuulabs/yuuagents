@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 from uuid import UUID
 
@@ -12,6 +13,7 @@ import yuutrace as ytrace
 from yuuagents.agent import Agent
 from yuuagents.context import AgentContext
 from yuuagents.persistence import TaskRecorder, ToolCallDTO, ToolErrorDTO, ToolResultDTO
+from yuuagents.running_tools import OutputBuffer, RunningToolRegistry
 from yuuagents.types import AgentStatus
 
 
@@ -66,6 +68,23 @@ def _trace_llm_gen_items(items: list[Any]) -> list[Any]:
     return out
 
 
+def _has_im_send(results: list[ytrace.ToolResult], tool_calls: list[Any]) -> bool:
+    """Check if any tool call in this step was an im send."""
+    for tc in tool_calls:
+        if hasattr(tc, "name") and "im" in tc.name and "send" in tc.name:
+            return True
+        # Also check execute_skill_cli calls that contain "im send"
+        if hasattr(tc, "arguments") and tc.arguments:
+            try:
+                args = json.loads(tc.arguments)
+                cmd = args.get("command", "")
+                if isinstance(cmd, str) and "im send" in cmd:
+                    return True
+            except Exception:
+                pass
+    return False
+
+
 async def run(
     agent: Agent,
     task: str,
@@ -78,6 +97,10 @@ async def run(
     if not resume:
         agent.setup(task)
 
+    # Set up running tools registry
+    registry = RunningToolRegistry()
+    ctx.running_tools = registry
+
     with ytrace.conversation(
         id=UUID(agent.task_id),
         agent=agent.agent_id,
@@ -86,13 +109,58 @@ async def run(
         chat.system(persona=agent.full_system_prompt, tools=agent.tools.specs())
         chat.user(task if not resume else agent.task)
 
+        last_user_msg_time = time.monotonic()
+        silence_interval_first = agent.silence_timeout or 0
+        silence_interval_subsequent = max(silence_interval_first * 2.5, 300)
+
         while not agent.done():
             if agent.max_steps and agent.steps >= agent.max_steps:
                 agent.status = AgentStatus.DONE
                 break
+
+            # Inject finished background tools as synthetic history
+            finished = registry.collect_finished()
+            for entry in finished:
+                try:
+                    result = entry.task.result()
+                    content = str(result.output) if result.error is None else str(result.error)
+                except Exception as exc:
+                    content = f"[ERROR] {type(exc).__name__}: {exc}"
+                # Synthetic assistant tool_call + tool_result pair
+                agent.history.append(yuullm.assistant(
+                    {"type": "tool_call", "id": entry.tool_call_id,
+                     "name": "check_running_tool",
+                     "arguments": json.dumps({"handle": entry.handle})}
+                ))
+                agent.history.append(yuullm.tool(
+                    entry.tool_call_id,
+                    f"Tool completed. Output: {content}",
+                ))
+
+            # Silence detection ping
+            if silence_interval_first > 0:
+                elapsed_silent = time.monotonic() - last_user_msg_time
+                threshold = (
+                    silence_interval_first
+                    if elapsed_silent < silence_interval_subsequent
+                    else silence_interval_subsequent
+                )
+                if elapsed_silent > threshold:
+                    total_elapsed = time.monotonic() - agent.created_at.timestamp()
+                    agent.history.append(yuullm.user(
+                        f"[system] 你已经工作了 {elapsed_silent:.0f}s 没有给用户发送任何消息。"
+                        "请通过 im send 告知用户当前进度和预计剩余时间。"
+                    ))
+                    last_user_msg_time = time.monotonic()
+
             try:
-                await _step(agent, chat, ctx, recorder=recorder)
-            except Exception as exc:
+                tool_calls = await _step(
+                    agent, chat, ctx, recorder=recorder,
+                )
+                # Track im send for silence detection
+                if tool_calls and _has_im_send([], tool_calls):
+                    last_user_msg_time = time.monotonic()
+            except BaseException as exc:
                 agent.fail(exc)
                 raise
 
@@ -103,8 +171,8 @@ async def _step(
     ctx: AgentContext,
     *,
     recorder: TaskRecorder | None = None,
-) -> None:
-    """Execute one LLM call + tool round."""
+) -> list[yuullm.ToolCall]:
+    """Execute one LLM call + tool round. Returns tool_calls from this step."""
     # 1. Call LLM
     with chat.llm_gen() as gen:
         stream, store = await agent.llm.stream(
@@ -197,15 +265,21 @@ async def _step(
     if not tool_calls:
         agent.status = AgentStatus.DONE
         agent.state.pending_input_prompt = ""
-        return
+        return tool_calls
 
     # 4. Execute tools
     with chat.tools() as tools_ctx:
         calls = []
+        buffers: dict[str, OutputBuffer] = {}
         for tc in tool_calls:
             tool_obj = agent.tools[tc.name]
+            # Create per-call output buffer for streaming capture
+            buf = OutputBuffer()
+            ctx.current_output_buffer = buf
             bound = tool_obj.bind(ctx)
+            ctx.current_output_buffer = None
             params = json.loads(tc.arguments) if tc.arguments else {}
+            buffers[tc.id] = buf
             calls.append(
                 {
                     "tool_call_id": tc.id,
@@ -214,11 +288,21 @@ async def _step(
                     "params": params,
                 }
             )
-        results = await tools_ctx.gather(calls)
+        results = await tools_ctx.gather(
+            calls,
+            soft_timeout=agent.soft_timeout,
+            registry=ctx.running_tools,
+            buffers=buffers,
+        )
 
     # 5. Append tool results to history
     for r in results:
-        content = str(r.error) if r.error else str(r.output)
+        if r.error:
+            content = str(r.error)
+        elif isinstance(r.output, list):
+            content = r.output  # multimodal content blocks — passthrough
+        else:
+            content = str(r.output)
         agent.history.append(yuullm.tool(r.tool_call_id, content))
     if agent.status not in (AgentStatus.DONE, AgentStatus.ERROR, AgentStatus.CANCELLED):
         agent.status = AgentStatus.RUNNING
@@ -243,3 +327,5 @@ async def _step(
                 for r in results
             ],
         )
+
+    return tool_calls
