@@ -209,6 +209,7 @@ async def execute_skill_cli(
     output_buffer: OutputBuffer | None = yt.depends(
         lambda ctx: ctx.current_output_buffer
     ),
+    subprocess_env: dict | None = yt.depends(lambda ctx: ctx.subprocess_env),
 ) -> str:
     timeout = max(1, min(timeout, 3600))
     argv, has_chain = _validate_cli_command(command)
@@ -219,10 +220,15 @@ async def execute_skill_cli(
     home = Path.home().expanduser().resolve()
     assert home.is_dir()
 
+    # Use explicit env if provided (isolates concurrent agents from each other),
+    # otherwise fall back to inheriting the process environment.
+    env_for_proc = subprocess_env or None
+
     if has_chain:
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=str(home),
+            env=env_for_proc,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -231,6 +237,7 @@ async def execute_skill_cli(
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(home),
+            env=env_for_proc,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,

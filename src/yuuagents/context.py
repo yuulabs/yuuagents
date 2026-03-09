@@ -59,6 +59,7 @@ class DelegateManager(Protocol):
         first_user_message: str,
         tools: list[str] | None,
         delegate_depth: int,
+        output_buffer: OutputBuffer | None,
     ) -> str: ...
 
 
@@ -104,3 +105,4 @@ class AgentContext:
     running_tools: RunningToolRegistry | None = None
     current_output_buffer: OutputBuffer | None = None
     skill_paths: list[str] = field(factory=list)
+    subprocess_env: dict | None = None
