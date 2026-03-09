@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import difflib
-import re
-
 import pytest
 import yuutools as yt
 
@@ -13,7 +9,7 @@ from yuuagents.context import AgentContext, DelegateDepthExceededError
 from yuuagents.tools import BUILTIN_TOOLS, get
 from yuuagents.tools.bash import execute_bash
 from yuuagents.tools.delegate import delegate
-from yuuagents.tools.file import _write_file_patch, delete_file, read_file, write_file
+from yuuagents.tools.file import delete_file, edit_file, read_file, write_file
 from yuuagents.tools.skill_cli import execute_skill_cli
 from yuuagents.tools.user_input import user_input
 from yuuagents.tools.web import web_search
@@ -30,7 +26,9 @@ class TestBuiltinToolsRegistry:
             "delegate",
             "read_file",
             "write_file",
+            "edit_file",
             "delete_file",
+            "read_skill",
             "user_input",
             "web_search",
             "launch_agent",
@@ -317,6 +315,115 @@ class TestWriteFileTool:
         assert isinstance(write_file, yt.Tool)
 
 
+class TestEditFileTool:
+    """Tests for edit_file tool."""
+
+    def test_is_tool_instance(self) -> None:
+        """Should be a Tool instance."""
+        assert isinstance(edit_file, yt.Tool)
+
+    def test_edit_file_in_registry(self) -> None:
+        """edit_file should be in registry."""
+        assert "edit_file" in BUILTIN_TOOLS
+        assert BUILTIN_TOOLS["edit_file"] is edit_file
+
+
+class TestEditFileE2E:
+    """End-to-end tests for edit_file — runs the generated Python script locally."""
+
+    @staticmethod
+    def _make_ctx(tmp_path):
+        import asyncio
+        import subprocess
+
+        class LocalExecutor:
+            async def exec(self, container_id: str, command: str, timeout: int) -> str:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    raise RuntimeError(stderr.decode())
+                return stdout.decode()
+
+        return AgentContext(
+            task_id="t1",
+            agent_id="main",
+            workdir=str(tmp_path),
+            docker_container="ignored",
+            docker=LocalExecutor(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_basic_replace(self, tmp_path):
+        target = tmp_path / "test.txt"
+        target.write_text("hello world")
+        ctx = self._make_ctx(tmp_path)
+        bound = edit_file.bind(ctx)
+        result = await bound.run(
+            path=str(target), old_string="hello", new_string="goodbye"
+        )
+        assert "Edited" in result
+        assert target.read_text() == "goodbye world"
+
+    @pytest.mark.asyncio
+    async def test_path_with_spaces(self, tmp_path):
+        target = tmp_path / "my file.txt"
+        target.write_text("aaa bbb ccc")
+        ctx = self._make_ctx(tmp_path)
+        bound = edit_file.bind(ctx)
+        await bound.run(path=str(target), old_string="bbb", new_string="BBB")
+        assert target.read_text() == "aaa BBB ccc"
+
+    @pytest.mark.asyncio
+    async def test_multiline_strings(self, tmp_path):
+        target = tmp_path / "multi.txt"
+        target.write_text("line1\nline2\nline3\n")
+        ctx = self._make_ctx(tmp_path)
+        bound = edit_file.bind(ctx)
+        await bound.run(
+            path=str(target), old_string="line2\nline3", new_string="replaced"
+        )
+        assert target.read_text() == "line1\nreplaced\n"
+
+    @pytest.mark.asyncio
+    async def test_rejects_zero_occurrences(self, tmp_path):
+        target = tmp_path / "test.txt"
+        target.write_text("hello world")
+        ctx = self._make_ctx(tmp_path)
+        bound = edit_file.bind(ctx)
+        with pytest.raises(RuntimeError, match="Expected 1 occurrence, found 0"):
+            await bound.run(
+                path=str(target), old_string="missing", new_string="x"
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejects_multiple_occurrences(self, tmp_path):
+        target = tmp_path / "test.txt"
+        target.write_text("aaa bbb aaa")
+        ctx = self._make_ctx(tmp_path)
+        bound = edit_file.bind(ctx)
+        with pytest.raises(RuntimeError, match="Expected 1 occurrence, found 2"):
+            await bound.run(
+                path=str(target), old_string="aaa", new_string="x"
+            )
+
+    @pytest.mark.asyncio
+    async def test_special_chars(self, tmp_path):
+        target = tmp_path / "special.txt"
+        target.write_text('say "hello" & <world>')
+        ctx = self._make_ctx(tmp_path)
+        bound = edit_file.bind(ctx)
+        await bound.run(
+            path=str(target),
+            old_string='"hello" & <world>',
+            new_string='"bye" | {earth}',
+        )
+        assert target.read_text() == 'say "bye" | {earth}'
+
+
 class TestDeleteFileTool:
     """Tests for delete_file tool."""
 
@@ -362,151 +469,6 @@ async def test_delegate_depth_limit_raises_custom_error() -> None:
     assert "max_depth=3" in msg
 
 
-class _FakeDocker:
-    def __init__(self, initial: str) -> None:
-        self.content = initial
-
-    async def exec(self, container_id: str, command: str, timeout: int) -> str:
-        m = re.search(
-            r"^printf %s (?P<b64>'[^']*'|[A-Za-z0-9+/=]+) \| base64 -d \| yagents-apply-patch (?P<path>.+)$",
-            command,
-        )
-        if m is not None:
-            b64 = m.group("b64").strip("'")
-            patch_text = base64.b64decode(b64.encode("ascii")).decode("utf-8")
-            before = self.content
-            after = _apply_unified_diff(before, patch_text)
-            self.content = after
-            summary = _diff_summary(
-                path=m.group("path").strip(),
-                before=before,
-                after=after,
-            )
-            return f"{summary}\n__YAGENTS_EXIT_CODE__=0"
-
-        raise AssertionError(f"unexpected command: {command!r}")
-
-
-def _apply_unified_diff(before: str, patch_text: str) -> str:
-    before_lines = before.splitlines(keepends=True)
-    i = 0
-    out: list[str] = []
-
-    lines = patch_text.splitlines(keepends=False)
-    idx = 0
-    while idx < len(lines):
-        line = lines[idx]
-        if line.startswith("@@ "):
-            m = re.match(
-                r"^@@ -(?P<a>\d+)(?:,(?P<b>\d+))? \+(?P<c>\d+)(?:,(?P<d>\d+))? @@",
-                line,
-            )
-            assert m is not None
-            old_start = int(m.group("a"))
-            out.extend(before_lines[i : old_start - 1])
-            i = old_start - 1
-            idx += 1
-            while idx < len(lines):
-                h = lines[idx]
-                if h.startswith("@@ "):
-                    break
-                if h.startswith("--- ") or h.startswith("+++ "):
-                    idx += 1
-                    continue
-                if not h:
-                    idx += 1
-                    continue
-                tag = h[0]
-                text = h[1:] + "\n"
-                if tag == " ":
-                    assert i < len(before_lines)
-                    assert before_lines[i] == text
-                    out.append(text)
-                    i += 1
-                elif tag == "-":
-                    assert i < len(before_lines)
-                    assert before_lines[i] == text
-                    i += 1
-                elif tag == "+":
-                    out.append(text)
-                else:
-                    raise AssertionError(f"unexpected hunk line: {h!r}")
-                idx += 1
-            continue
-        idx += 1
-    out.extend(before_lines[i:])
-    return "".join(out)
-
-
-def _diff_summary(*, path: str, before: str, after: str) -> str:
-    diff = list(
-        difflib.unified_diff(
-            before.splitlines(),
-            after.splitlines(),
-            fromfile=f"a{path}",
-            tofile=f"b{path}",
-            lineterm="",
-        )
-    )
-    hunks = sum(1 for line in diff if line.startswith("@@ "))
-    added = sum(
-        1 for line in diff if line.startswith("+") and not line.startswith("+++")
-    )
-    removed = sum(
-        1 for line in diff if line.startswith("-") and not line.startswith("---")
-    )
-    if before == after:
-        return f"{path}\nno-op\nhunks: 0\nlines: +0 -0"
-    return f"{path}\nhunks: {hunks}\nlines: +{added} -{removed}"
-
-
-@pytest.mark.asyncio
-async def test_write_file_applies_patch_and_returns_diff_summary() -> None:
-    docker = _FakeDocker("a\nb\n")
-    patch = "\n".join(
-        [
-            "--- a/x.txt",
-            "+++ b/x.txt",
-            "@@ -1,2 +1,3 @@",
-            " a",
-            "+b2",
-            " b",
-            "",
-        ]
-    )
-    summary = await _write_file_patch(
-        path="/x.txt",
-        patch=patch,
-        container="c1",
-        docker=docker,
-    )
-    assert docker.content == "a\nb2\nb\n"
-    assert "/x.txt" in summary
-    assert "hunks: 1" in summary
-    assert "lines: +1 -0" in summary
-
-
-@pytest.mark.asyncio
-async def test_write_file_noop_patch_returns_noop_summary() -> None:
-    docker = _FakeDocker("a\nb\n")
-    patch = "\n".join(
-        [
-            "--- a/x.txt",
-            "+++ b/x.txt",
-            "@@ -1,2 +1,2 @@",
-            " a",
-            " b",
-            "",
-        ]
-    )
-    summary = await _write_file_patch(
-        path="/x.txt",
-        patch=patch,
-        container="c1",
-        docker=docker,
-    )
-    assert docker.content == "a\nb\n"
-    assert "no-op" in summary
 
 
 # ── cli_guard integration tests ──────────────────────────────────────────────
@@ -599,3 +561,74 @@ class TestCliGuard:
         with pytest.raises(ValueError, match="dangerous command"):
             await bound.run(command="rm -rf /tmp/foo", timeout=5)
         assert len(calls) == 0
+
+
+class TestReadFileE2E:
+    """End-to-end tests for read_file — runs via LocalExecutor."""
+
+    @staticmethod
+    def _make_ctx(tmp_path):
+        import asyncio
+        import subprocess
+
+        class LocalExecutor:
+            async def exec(self, container_id: str, command: str, timeout: int) -> str:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    raise RuntimeError(stderr.decode())
+                return stdout.decode()
+
+        return AgentContext(
+            task_id="t1",
+            agent_id="main",
+            workdir=str(tmp_path),
+            docker_container="ignored",
+            docker=LocalExecutor(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_text_file(self, tmp_path):
+        target = tmp_path / "hello.txt"
+        target.write_text("hello world\n")
+        ctx = self._make_ctx(tmp_path)
+        bound = read_file.bind(ctx)
+        result = await bound.run(path=str(target))
+        assert result == "hello world\n"
+
+    @pytest.mark.asyncio
+    async def test_read_large_text_file_rejected(self, tmp_path):
+        target = tmp_path / "big.txt"
+        target.write_text("line\n" * 700)
+        ctx = self._make_ctx(tmp_path)
+        bound = read_file.bind(ctx)
+        with pytest.raises(RuntimeError, match="too large"):
+            await bound.run(path=str(target))
+
+    @pytest.mark.asyncio
+    async def test_read_binary_file_rejected(self, tmp_path):
+        target = tmp_path / "blob.bin"
+        target.write_bytes(b"\x00\x01\x02\x03" * 100)
+        ctx = self._make_ctx(tmp_path)
+        bound = read_file.bind(ctx)
+        with pytest.raises(RuntimeError, match="Binary file"):
+            await bound.run(path=str(target))
+
+    @pytest.mark.asyncio
+    async def test_read_image_returns_multimodal(self, tmp_path):
+        # Create a minimal valid PNG (1x1 pixel)
+        import base64
+
+        png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        target = tmp_path / "pixel.png"
+        target.write_bytes(base64.b64decode(png_b64))
+        ctx = self._make_ctx(tmp_path)
+        bound = read_file.bind(ctx)
+        result = await bound.run(path=str(target))
+        assert isinstance(result, list)
+        assert result[0]["type"] == "image_url"
+        assert result[0]["image_url"]["url"].startswith("data:image/")

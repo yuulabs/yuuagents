@@ -47,10 +47,10 @@ class TestRuntimeDockerfileText:
         assert isinstance(text, str)
         assert "FROM" in text
 
-    def test_fallback_when_file_missing(self) -> None:
+    def test_raises_when_file_missing(self) -> None:
         with patch("pathlib.Path.read_text", side_effect=FileNotFoundError):
-            text = _runtime_dockerfile_text()
-        assert "FROM ubuntu:24.04" in text
+            with pytest.raises(FileNotFoundError):
+                _runtime_dockerfile_text()
 
 
 # ---------------------------------------------------------------------------
