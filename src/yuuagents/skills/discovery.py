@@ -94,7 +94,7 @@ def render(skills: list[SkillInfo]) -> str:
     lines.append("")
     lines.append(
         "使用 execute_skill_cli 工具执行上述 Skill 提供的 CLI 命令。\n"
-        "⚠️ 首次调用某个 Skill 的命令前，必须先用 execute_skill_cli 执行 "
-        "`cat <location>` 阅读对应的 SKILL.md，确认参数格式后再调用。不要猜测参数。"
+        "⚠️ 首次调用某个 Skill 的命令前，必须先用 read_skill('<name>') 阅读其文档，"
+        "确认参数格式后再调用。不要猜测参数。"
     )
     return "\n".join(lines)

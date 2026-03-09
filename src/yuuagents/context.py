@@ -103,3 +103,4 @@ class AgentContext:
     cli_guard: CliGuard | None = None
     running_tools: RunningToolRegistry | None = None
     current_output_buffer: OutputBuffer | None = None
+    skill_paths: list[str] = field(factory=list)
