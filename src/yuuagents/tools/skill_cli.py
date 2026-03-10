@@ -7,6 +7,7 @@ import shlex
 from pathlib import Path
 
 import yuutools as yt
+from yuutools._depends import DependencyMarker
 
 from yuuagents.context import CliGuard
 from yuuagents.running_tools import OutputBuffer
@@ -213,6 +214,13 @@ async def execute_skill_cli(
 ) -> str:
     timeout = max(1, min(timeout, 3600))
     argv, has_chain = _validate_cli_command(command)
+
+    if isinstance(cli_guard, DependencyMarker):
+        cli_guard = None
+    if isinstance(output_buffer, DependencyMarker):
+        output_buffer = None
+    if isinstance(subprocess_env, DependencyMarker):
+        subprocess_env = None
 
     if cli_guard is not None:
         cli_guard(argv)

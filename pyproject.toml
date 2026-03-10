@@ -62,3 +62,8 @@ python_version = "3.14"
 [[tool.mypy.overrides]]
 module = "skills_ref.*"
 ignore_missing_imports = true
+
+[tool.uv.sources]
+yuullm = { path = "../yuullm", editable = true }
+yuutrace = { path = "../yuutrace", editable = true }
+yuutools = { path = "../yuutools", editable = true }

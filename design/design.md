@@ -130,8 +130,9 @@ class AgentContext:
 | Tool           | Description                                 | Phase |
 | -------------- | ------------------------------------------- | ----- |
 | execute_bash   | Docker 容器中执行命令（docker exec）          | 1     |
-| read_file      | 读取文件（容器内）                            | 1     |
-| write_file     | 写入文件（容器内）                            | 1     |
+| read_file      | 读取文件（容器内，带大小/二进制检查，图片返回多模态） | 1     |
+| write_file     | 对文件应用 patch                              | 1     |
+| edit_file      | 精确替换文件中的唯一字符串                     | 1     |
 | delete_file    | 删除文件（容器内）                            | 1     |
 | web_search     | Tavily API 搜索，返回 LLM 友好文本            | 1     |
 | web_fetch      | 获取 URL 内容，提取正文转 markdown             | 2     |
@@ -160,16 +161,22 @@ async def execute_bash(
 #### file 工具
 
 ```python
-@yt.tool(params={"path": "Absolute file path", "content": "File content to write"})
+@yt.tool(params={"path": "Absolute file path to patch", "patch": "Unified diff patch"})
 async def write_file(
     path: str,
-    content: str,
+    patch: str,
     container: str = yt.depends(lambda ctx: ctx.docker_container),
 ) -> str:
-    """Write content to a file. Creates parent directories if needed."""
+    """Apply a patch to a file and return a short summary."""
 ```
 
-file 工具同样通过 docker exec 在容器内操作，确保与 bash 工具共享同一个文件系统视图。
+`read_file` 只返回适合直接喂给 LLM 的内容：
+- 普通文本直接返回文本
+- 过大的文本文件拒绝读取
+- 二进制文件拒绝读取
+- 常见图片返回 `image_url` 多模态块
+
+`write_file` 和 `edit_file` 都通过容器内命令修改文件，确保与 bash 工具共享同一个文件系统视图。
 
 #### web_search
 

@@ -74,9 +74,12 @@ class RunningToolRegistry:
         except (TimeoutError, asyncio.TimeoutError):
             elapsed = time.monotonic() - entry.started
             tail = entry.buffer.tail()
+            tail_display = tail if tail.strip() else "<no output captured yet>"
             return (
-                f"Still running ({elapsed:.0f}s). handle={handle}\n"
-                f"Tail output:\n{tail}"
+                f"Still running ({elapsed:.0f}s since registered). handle={handle}\n"
+                f"name: {entry.name or '?'}\n"
+                f"tool_call_id: {entry.tool_call_id}\n"
+                f"Tail output:\n{tail_display}"
             )
         return self._format_done(entry)
 

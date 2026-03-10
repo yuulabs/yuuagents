@@ -1263,9 +1263,9 @@ requires-dist = [
     { name = "starlette", specifier = ">=0.40.0" },
     { name = "tavily-python", specifier = ">=0.5.0" },
     { name = "uvicorn", specifier = ">=0.30.0" },
-    { name = "yuullm", specifier = ">=0.3.1" },
-    { name = "yuutools", specifier = ">=0.1.0" },
-    { name = "yuutrace", specifier = ">=0.1.11" },
+    { name = "yuullm", editable = "../yuullm" },
+    { name = "yuutools", editable = "../yuutools" },
+    { name = "yuutrace", editable = "../yuutrace" },
 ]
 
 [package.metadata.requires-dev]
@@ -1280,8 +1280,8 @@ examples = [{ name = "rich", specifier = ">=13.0.0" }]
 
 [[package]]
 name = "yuullm"
-version = "0.4.2"
-source = { registry = "https://pypi.org/simple" }
+version = "0.5.0"
+source = { editable = "../yuullm" }
 dependencies = [
     { name = "anthropic" },
     { name = "genai-prices" },
@@ -1289,28 +1289,43 @@ dependencies = [
     { name = "openai" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e2/f3/13df41adcb2bba1a2fe39cca310a8c43cf81ad57111d139d4fa3bf21351c/yuullm-0.4.2.tar.gz", hash = "sha256:b56d2849becb939d3777c278e5302925197db716cd35c24af977a93a00bc430f", size = 13799, upload-time = "2026-03-08T09:11:18.192Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b7/19/17979cea1ba549832c88874962444a5d9eb0ecc3b30717409456de05f03a/yuullm-0.4.2-py3-none-any.whl", hash = "sha256:1504a8fcffe2d6cd2461e62b554cfa409ca411617a883fb09e8a7faa2ed8f551", size = 18759, upload-time = "2026-03-08T09:11:17.196Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", specifier = ">=0.52.0" },
+    { name = "genai-prices", specifier = ">=0.0.50" },
+    { name = "msgspec", specifier = ">=0.19.0" },
+    { name = "openai", specifier = ">=1.70.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.26.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
+provides-extras = ["dev"]
 
 [[package]]
 name = "yuutools"
 version = "0.1.0"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "../yuutools" }
 dependencies = [
     { name = "attrs" },
     { name = "msgspec" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ed/0c/c2ac83461e03b222a2dd5571e38754abad85df04e3fccd244de5b65560eb/yuutools-0.1.0.tar.gz", hash = "sha256:f348f45452af3aee9c39c2ce956aea9cdd0eead1b787ca8e9a75060c17e47280", size = 5159, upload-time = "2026-02-08T04:03:54.998Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/15/55edec817435bd5569029bb0d58fbc7b48919799c36b5bc5b2fde876af97/yuutools-0.1.0-py3-none-any.whl", hash = "sha256:558f19d11f8572dbadf39b0ef1efb2d817d0180328dcba44006c2aa121d4d65c", size = 7598, upload-time = "2026-02-08T04:03:53.474Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "attrs", specifier = ">=24.2.0" },
+    { name = "msgspec", specifier = ">=0.19.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
+    { name = "pyyaml", marker = "extra == 'yaml'", specifier = ">=6.0" },
 ]
+provides-extras = ["yaml", "dev"]
 
 [[package]]
 name = "yuutrace"
 version = "0.1.11"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "../yuutrace" }
 dependencies = [
     { name = "msgspec" },
     { name = "opentelemetry-api" },
@@ -1319,9 +1334,15 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ac/4c/eec507eaf60128c8611cc8101e6962a253727e4bab71799f073a19d76cb7/yuutrace-0.1.11.tar.gz", hash = "sha256:655619d370c0edb1d85025a0984fb26d18bb7552e71523795f7810d4aa244531", size = 88632, upload-time = "2026-02-17T15:02:04.956Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/a6/dcb05ede95af6cbd278a71a9b935e38b00f53bf60f4b0a8867da2ac46876/yuutrace-0.1.11-py3-none-any.whl", hash = "sha256:59dd899d1eab2c9baf404218f21145e74603d3a857d327795c4c462ccca16813", size = 94871, upload-time = "2026-02-17T15:02:03.197Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "msgspec", specifier = ">=0.19.0" },
+    { name = "opentelemetry-api", specifier = ">=1.20.0" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.20.0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.20.0" },
+    { name = "starlette", specifier = ">=0.40.0" },
+    { name = "uvicorn", specifier = ">=0.30.0" },
 ]
 
 [[package]]
