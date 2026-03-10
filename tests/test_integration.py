@@ -18,6 +18,7 @@ from yuuagents.context import AgentContext
 from yuuagents.daemon.docker import DockerManager
 from yuuagents.daemon.manager import AgentManager
 from yuuagents.loop import run as run_agent
+from yuuagents.running_tools import OutputBuffer
 from yuuagents.skills.discovery import scan
 from yuuagents.tools import BUILTIN_TOOLS, get
 from yuuagents.types import AgentStatus, TaskRequest
@@ -152,6 +153,62 @@ class TestAgentLifecycle:
 
         info = await manager.status(agent.task_id)
         assert info.last_assistant_message == "final answer"
+
+    async def test_agent_streams_text_and_tool_calls_to_output_buffer(self) -> None:
+        @yt.tool(params={}, description="noop tool")
+        async def noop() -> str:
+            return "ok"
+
+        class FakeLLM:
+            default_model = "test-model"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(
+                self,
+                history: yuullm.History,
+                tools: list[dict[str, object]] | None = None,
+            ) -> tuple[AsyncIterator[yuullm.StreamItem], yuullm.Store]:
+                self.calls += 1
+
+                async def _iter() -> AsyncIterator[yuullm.StreamItem]:
+                    if self.calls == 1:
+                        yield yuullm.Response(item="working")
+                        yield yuullm.ToolCall(
+                            id="tc1", name="noop", arguments="{}",
+                        )
+                    else:
+                        yield yuullm.Response(item="done")
+
+                return _iter(), {}
+
+        tools = yt.ToolManager([noop])
+        builder = SimplePromptBuilder().add_section("test persona")
+        config = AgentConfig(
+            task_id="12345678123456781234567812345678",
+            agent_id="test-agent",
+            persona="test",
+            tools=tools,
+            llm=FakeLLM(),  # type: ignore[arg-type]
+            prompt_builder=builder,
+        )
+        agent = Agent(config=config)
+        buffer = OutputBuffer()
+        ctx = AgentContext(
+            task_id="12345678123456781234567812345678",
+            agent_id="test-agent",
+            workdir="/tmp",
+            docker_container="dummy",
+            output_buffer=buffer,
+        )
+
+        await run_agent(agent, "hello", ctx)
+
+        text = buffer.full()
+        assert "working" in text
+        assert "[calling noop]" in text
+        assert "done" in text
 
     async def test_manager_make_llm_sets_price_calculator_by_default(self) -> None:
         cfg = Config()

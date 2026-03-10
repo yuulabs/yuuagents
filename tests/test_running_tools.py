@@ -176,3 +176,20 @@ async def test_gather_soft_timeout():
             await entry.task
         except asyncio.CancelledError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_cancel_result_after_cancelled_task() -> None:
+    registry = RunningToolRegistry()
+    buf = OutputBuffer()
+
+    async def forever() -> ToolResult:
+        await asyncio.sleep(9999)
+        return ToolResult(tool_call_id="tc6", output="nope")
+
+    task = asyncio.create_task(forever())
+    handle = registry.register("forever", task, buf, "tc6")
+    registry.cancel(handle)
+    await asyncio.sleep(0.05)
+    result = await registry.check(handle, wait=0.1)
+    assert "unknown handle" in result.lower()

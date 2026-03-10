@@ -169,7 +169,3 @@ exit 0
 EOF
 
 RUN chmod +x /usr/local/bin/yagents-apply-patch
-
-# -- background CLI (long-running tasks in containers) -------------------------
-COPY background_cli.py /usr/local/bin/background
-RUN chmod +x /usr/local/bin/background

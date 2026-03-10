@@ -31,6 +31,7 @@ async def delegate(
     manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
     caller_agent: str = yt.depends(lambda ctx: ctx.agent_id),
     delegate_depth: int = yt.depends(lambda ctx: ctx.delegate_depth),
+    output_buffer=yt.depends(lambda ctx: ctx.current_output_buffer),
 ) -> str:
     assert isinstance(caller_agent, str)
     caller_agent = caller_agent.strip()
@@ -67,4 +68,5 @@ async def delegate(
         first_user_message=first_user_message,
         tools=tools,
         delegate_depth=delegate_depth + 1,
+        output_buffer=output_buffer,
     )

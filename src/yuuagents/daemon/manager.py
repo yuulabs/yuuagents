@@ -92,7 +92,7 @@ class AgentManager:
             or (agent_entry.persona if agent_entry and agent_entry.persona else "")
             or agent_id
         )
-        # Apply {var} substitution (e.g. {background_cli_prompt})
+        # Apply {var} substitution from yuuagents prompt fragments.
         prompt_vars = get_prompt_vars()
         for key, value in prompt_vars.items():
             persona_text = persona_text.replace(f"{{{key}}}", value)

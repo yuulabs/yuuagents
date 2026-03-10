@@ -17,6 +17,4 @@ PROMPT_VARS: dict[str, str] = {}
 
 def get_vars() -> dict[str, str]:
     """Return prompt variables, lazily loading on first call."""
-    if not PROMPT_VARS:
-        PROMPT_VARS["background_cli_prompt"] = load("background_cli")
     return PROMPT_VARS

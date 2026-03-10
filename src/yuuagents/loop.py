@@ -17,6 +17,13 @@ from yuuagents.running_tools import OutputBuffer, RunningToolRegistry
 from yuuagents.types import AgentStatus
 
 
+def _write_output_buffer(ctx: AgentContext, text: str) -> None:
+    buf = ctx.current_output_buffer or ctx.output_buffer
+    if buf is None or not text:
+        return
+    buf.write(text.encode("utf-8", errors="replace"))
+
+
 def _trace_llm_gen_items(items: list[Any]) -> list[Any]:
     out: list[Any] = []
     text_buf: list[str] = []
@@ -183,6 +190,11 @@ async def _step(
         items: list[Any] = []
         async for item in stream:
             items.append(item)
+            match item:
+                case yuullm.Response(item=i) if isinstance(i, str):
+                    _write_output_buffer(ctx, i)
+                case yuullm.ToolCall() as tc:
+                    _write_output_buffer(ctx, f"\n[calling {tc.name}]\n")
         gen.log(_trace_llm_gen_items(items))
 
         # Record usage & cost

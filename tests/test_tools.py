@@ -147,6 +147,46 @@ class TestExecuteBashTool:
         assert isinstance(execute_bash, yt.Tool)
 
 
+@pytest.mark.asyncio
+async def test_execute_bash_passes_current_output_buffer() -> None:
+    seen: dict[str, object] = {}
+
+    class FakeDocker:
+        async def exec_terminal(
+            self,
+            container_id: str,
+            session_id: str,
+            command: str,
+            timeout: int,
+            output_buffer=None,
+        ) -> str:
+            seen["container_id"] = container_id
+            seen["session_id"] = session_id
+            seen["command"] = command
+            seen["timeout"] = timeout
+            seen["output_buffer"] = output_buffer
+            return "ok"
+
+    buf = object()
+    ctx = AgentContext(
+        task_id="t1",
+        agent_id="main",
+        workdir="/tmp",
+        docker_container="c1",
+        docker=FakeDocker(),
+        current_output_buffer=buf,
+    )
+    bound = execute_bash.bind(ctx)
+    result = await bound.run(command="echo hello", timeout=7)
+
+    assert result == "ok"
+    assert seen["container_id"] == "c1"
+    assert seen["session_id"] == "t1"
+    assert seen["command"] == "echo hello"
+    assert seen["timeout"] == 7
+    assert seen["output_buffer"] is buf
+
+
 class TestExecuteSkillCliTool:
     """Tests for execute_skill_cli tool."""
 
@@ -467,6 +507,49 @@ async def test_delegate_depth_limit_raises_custom_error() -> None:
     msg = str(exc_info.value)
     assert "delegate depth limit exceeded" in msg
     assert "max_depth=3" in msg
+
+
+@pytest.mark.asyncio
+async def test_delegate_passes_current_output_buffer() -> None:
+    seen: dict[str, object] = {}
+
+    class FakeManager:
+        async def delegate(
+            self,
+            *,
+            caller_agent: str,
+            agent: str,
+            first_user_message: str,
+            tools: list[str] | None,
+            delegate_depth: int,
+            output_buffer,
+        ) -> str:
+            seen["caller_agent"] = caller_agent
+            seen["agent"] = agent
+            seen["first_user_message"] = first_user_message
+            seen["tools"] = tools
+            seen["delegate_depth"] = delegate_depth
+            seen["output_buffer"] = output_buffer
+            return "ok"
+
+    buf = object()
+    ctx = AgentContext(
+        task_id="t1",
+        agent_id="main",
+        workdir="/tmp",
+        docker_container="c1",
+        delegate_depth=0,
+        manager=FakeManager(),
+        current_output_buffer=buf,
+    )
+    bound = delegate.bind(ctx)
+    result = await bound.run(agent="coder", context="ctx", task="do work")
+
+    assert result == "ok"
+    assert seen["caller_agent"] == "main"
+    assert seen["agent"] == "coder"
+    assert seen["delegate_depth"] == 1
+    assert seen["output_buffer"] is buf
 
 
 

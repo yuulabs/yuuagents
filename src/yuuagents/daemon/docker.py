@@ -159,6 +159,7 @@ class DockerManager:
         session_id: str,
         command: str,
         timeout: int,
+        output_buffer: OutputBuffer | None = None,
     ) -> str:
         await self._ensure_started()
         assert isinstance(session_id, str) and session_id
@@ -178,6 +179,7 @@ class DockerManager:
                 session_name=session_name,
                 command=command,
                 timeout=timeout,
+                output_buffer=output_buffer,
             )
 
     async def _exec_with_shell(
@@ -371,6 +373,7 @@ echo "$missing"
         session_name: str,
         command: str,
         timeout: int,
+        output_buffer: OutputBuffer | None = None,
     ) -> str:
         token = uuid.uuid4().hex
         cmd_b64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
@@ -393,21 +396,36 @@ echo "$missing"
 
         deadline = asyncio.get_running_loop().time() + max(1, timeout)
         last_capture = ""
-        while True:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return f"[ERROR] Command timed out after {timeout}s"
+        streamed_body = ""
+        try:
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return f"[ERROR] Command timed out after {timeout}s"
 
-            cap = await self._exec_with_shell(
-                container_id,
-                "bash",
-                f"tmux capture-pane -p -t {q_sess} -S -2000",
-                int(min(10, max(1, remaining))),
-            )
-            last_capture = cap
-            if end_prefix in cap:
-                break
-            await asyncio.sleep(0.1)
+                cap = await self._exec_with_shell(
+                    container_id,
+                    "bash",
+                    f"tmux capture-pane -p -t {q_sess} -S -2000",
+                    int(min(10, max(1, remaining))),
+                )
+                last_capture = cap
+                body = self._extract_tmux_body(
+                    capture=cap,
+                    begin=begin,
+                    end_prefix=end_prefix,
+                )
+                if body is not None and output_buffer is not None:
+                    delta = body[len(streamed_body):]
+                    if delta:
+                        output_buffer.write(delta.encode("utf-8", errors="replace"))
+                    streamed_body = body
+                if end_prefix in cap:
+                    break
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            await self._interrupt_tmux_command(container_id, session_name)
+            raise
 
         lines = last_capture.splitlines()
         begin_idx = -1
@@ -431,6 +449,40 @@ echo "$missing"
         if code != 0:
             return f"{body}\n[exit code: {code}]".strip()
         return body
+
+    @staticmethod
+    def _extract_tmux_body(
+        *,
+        capture: str,
+        begin: str,
+        end_prefix: str,
+    ) -> str | None:
+        lines = capture.splitlines()
+        begin_idx = -1
+        end_idx = -1
+        for i, line in enumerate(lines):
+            if line.strip() == begin:
+                begin_idx = i
+            if line.strip().startswith(end_prefix):
+                end_idx = i
+                break
+        if begin_idx == -1:
+            return None
+        if end_idx == -1:
+            return "\n".join(lines[begin_idx + 1 :]).strip()
+        return "\n".join(lines[begin_idx + 1 : end_idx]).strip()
+
+    async def _interrupt_tmux_command(self, container_id: str, session_name: str) -> None:
+        q_sess = shlex.quote(session_name)
+        try:
+            await self._exec_with_shell(
+                container_id,
+                "bash",
+                f"tmux send-keys -t {q_sess} C-c",
+                5,
+            )
+        except Exception:
+            logger.debug("Failed to interrupt tmux session {}", session_name)
 
     async def cleanup(self, task_id: str) -> None:
         """Remove a per-task container (if we created one)."""

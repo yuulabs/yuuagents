@@ -24,6 +24,13 @@ async def execute_bash(
     session_id: str = yt.depends(lambda ctx: ctx.task_id),
     container: str = yt.depends(lambda ctx: ctx.docker_container),
     docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
+    output_buffer=yt.depends(lambda ctx: ctx.current_output_buffer),
 ) -> str:
     timeout = max(1, min(timeout, 600))
-    return await docker.exec_terminal(container, session_id, command, timeout)
+    return await docker.exec_terminal(
+        container,
+        session_id,
+        command,
+        timeout,
+        output_buffer=output_buffer,
+    )
