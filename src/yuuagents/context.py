@@ -110,3 +110,4 @@ class AgentContext:
     output_buffer: OutputBuffer | None = None
     skill_paths: list[str] = field(factory=list)
     subprocess_env: dict | None = None
+    addon_context: object | None = None  # yuubot AddonContext, opaque to yuuagents
