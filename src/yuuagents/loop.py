@@ -118,6 +118,38 @@ def _drain_pings(flow: Any) -> list[Ping]:
     return pings
 
 
+_MERGEABLE_KINDS = {PingKind.USER_MESSAGE, PingKind.SYSTEM_NOTE}
+
+
+def _merge_user_pings(pings: list[Ping]) -> list[Ping]:
+    """Merge consecutive USER_MESSAGE/SYSTEM_NOTE pings into a single USER_MESSAGE ping."""
+    result: list[Ping] = []
+    i = 0
+    while i < len(pings):
+        p = pings[i]
+        if p.kind in _MERGEABLE_KINDS:
+            parts = [p.payload]
+            first_source = p.source_flow_id
+            j = i + 1
+            while j < len(pings) and pings[j].kind in _MERGEABLE_KINDS:
+                parts.append(pings[j].payload)
+                j += 1
+            result.append(Ping(
+                kind=PingKind.USER_MESSAGE,
+                source_flow_id=first_source,
+                payload="\n".join(parts),
+            ))
+            i = j
+        else:
+            result.append(p)
+            i += 1
+    return result
+
+
+def _apply_ping(agent: Any, ping: Ping, flow_manager: FlowManager) -> None:
+    """Append a ping to the agent's history as a user message."""
+    agent.history.append(yuullm.user(ping.payload))
+
 
 # ---------------------------------------------------------------------------
 # Monitor coroutine for tool flows
@@ -198,7 +230,7 @@ async def run(
                         "请通过 im send 告知用户当前进度和预计剩余时间。"
                     )
                     agent.history.append(yuullm.user(silence_msg))
-                    chat.inject(silence_msg)
+                    chat.user(silence_msg)
                     last_user_msg_time = time.monotonic()
 
             try:
@@ -221,7 +253,7 @@ async def run(
                         lines = [format_ping(p, flow_manager) for p in pending_pings]
                         summary = "[system] 后台通知：\n" + "\n".join(lines)
                         agent.history.append(yuullm.user(summary))
-                        chat.inject(summary)
+                        chat.user(summary)
                         agent.status = AgentStatus.RUNNING  # keep the loop alive
 
                 # LLM emitted text only but children are still running —
@@ -235,7 +267,7 @@ async def run(
                     if ping is not None:
                         ping_msg = "[system] 后台通知：\n" + format_ping(ping, flow_manager)
                         agent.history.append(yuullm.user(ping_msg))
-                        chat.inject(ping_msg)
+                        chat.user(ping_msg)
                     else:
                         # Timed out waiting — give up
                         agent.status = AgentStatus.DONE
@@ -450,6 +482,6 @@ async def _step(
             lines = [format_ping(p, flow_manager) for p in pending_pings]
             summary = "[system] 后台通知：\n" + "\n".join(lines)
             agent.history.append(yuullm.user(summary))
-            chat.inject(summary)
+            chat.user(summary)
 
     return tool_calls
