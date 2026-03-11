@@ -12,6 +12,7 @@ from loguru import logger
 
 from yuuagents.agent import Agent
 from yuuagents.context import AgentContext
+from yuuagents.flow import FlowManager
 from yuuagents.loop import run as run_agent
 from yuuagents.types import AgentStatus
 
@@ -45,6 +46,7 @@ class AgentSession:
     ctx: AgentContext
     task_text: str
     on_complete: OnComplete | None = None
+    _flow_manager: FlowManager = field(factory=FlowManager, init=False)
     _asyncio_task: asyncio.Task | None = field(default=None, init=False)
     _started_at: float = field(factory=time.monotonic, init=False)
 
@@ -57,13 +59,17 @@ class AgentSession:
 
     async def start(self) -> None:
         self._started_at = time.monotonic()
+        self._flow_manager = FlowManager()
         self._asyncio_task = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
         result_text: str | None = None
         error_text: str | None = None
         try:
-            await run_agent(self.agent, self.task_text, self.ctx)
+            await run_agent(
+                self.agent, self.task_text, self.ctx,
+                flow_manager=self._flow_manager,
+            )
             result_text = self.result()
         except asyncio.CancelledError:
             self.agent.status = AgentStatus.CANCELLED
@@ -90,13 +96,17 @@ class AgentSession:
     async def resume(self) -> None:
         if self.agent.status == AgentStatus.CANCELLED:
             self.agent.status = AgentStatus.RUNNING
+        self._flow_manager = FlowManager()
         self._asyncio_task = asyncio.create_task(self._run_resume())
 
     async def _run_resume(self) -> None:
         result_text: str | None = None
         error_text: str | None = None
         try:
-            await run_agent(self.agent, self.task_text, self.ctx, resume=True)
+            await run_agent(
+                self.agent, self.task_text, self.ctx,
+                resume=True, flow_manager=self._flow_manager,
+            )
             result_text = self.result()
         except asyncio.CancelledError:
             self.agent.status = AgentStatus.CANCELLED

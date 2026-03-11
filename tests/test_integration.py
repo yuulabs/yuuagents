@@ -18,7 +18,7 @@ from yuuagents.context import AgentContext
 from yuuagents.daemon.docker import DockerManager
 from yuuagents.daemon.manager import AgentManager
 from yuuagents.loop import run as run_agent
-from yuuagents.running_tools import OutputBuffer
+from yuuagents.flow import OutputBuffer
 from yuuagents.skills.discovery import scan
 from yuuagents.tools import BUILTIN_TOOLS, get
 from yuuagents.types import AgentStatus, TaskRequest

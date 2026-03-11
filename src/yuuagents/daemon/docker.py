@@ -18,7 +18,7 @@ from attrs import define, field
 from loguru import logger
 
 if TYPE_CHECKING:
-    from yuuagents.running_tools import OutputBuffer
+    from yuuagents.flow import OutputBuffer
 
 _DOCKERS_ROOT = Path("~/.yagents/dockers").expanduser()
 
@@ -98,6 +98,23 @@ class DockerManager:
     @property
     def default_container_id(self) -> str:
         return self.default_container
+
+    async def host_home_dir(self, container_id: str) -> str:
+        """Return the host directory bound to ``container_home``."""
+        await self._ensure_started()
+        assert self._client is not None
+
+        container = self._client.containers.container(container_id)
+        info = await container.show()
+        for mount in info.get("Mounts", []):
+            if mount.get("Destination") == self.container_home:
+                source = mount.get("Source", "")
+                if source:
+                    return source
+                break
+        raise ValueError(
+            f"container {container_id!r} has no mount for {self.container_home!r}"
+        )
 
     async def resolve(
         self,
@@ -401,6 +418,7 @@ echo "$missing"
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
+                    await self._interrupt_tmux_command(container_id, session_name)
                     return f"[ERROR] Command timed out after {timeout}s"
 
                 cap = await self._exec_with_shell(

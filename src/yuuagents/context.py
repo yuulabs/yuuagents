@@ -9,7 +9,7 @@ from attrs import define, field
 
 if TYPE_CHECKING:
     from yuuagents.agent import AgentState
-    from yuuagents.running_tools import OutputBuffer, RunningToolRegistry
+    from yuuagents.flow import Flow, FlowManager, OutputBuffer
 
 
 class DockerExecutor(Protocol):
@@ -103,7 +103,9 @@ class AgentContext:
     session_manager: SessionManager | None = None
     tavily_api_key: str = ""
     cli_guard: CliGuard | None = None
-    running_tools: RunningToolRegistry | None = None
+    flow_manager: FlowManager | None = None
+    root_flow: Flow | None = None
+    current_flow_id: str | None = None
     current_output_buffer: OutputBuffer | None = None
     output_buffer: OutputBuffer | None = None
     skill_paths: list[str] = field(factory=list)

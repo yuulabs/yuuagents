@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -12,8 +13,17 @@ import yuutrace as ytrace
 
 from yuuagents.agent import Agent
 from yuuagents.context import AgentContext
+from yuuagents.flow import (
+    Flow,
+    FlowKind,
+    FlowManager,
+    FlowStatus,
+    OutputBuffer,
+    Ping,
+    PingKind,
+    format_ping,
+)
 from yuuagents.persistence import TaskRecorder, ToolCallDTO, ToolErrorDTO, ToolResultDTO
-from yuuagents.running_tools import OutputBuffer, RunningToolRegistry
 from yuuagents.types import AgentStatus
 
 
@@ -92,6 +102,47 @@ def _has_im_send(results: list[ytrace.ToolResult], tool_calls: list[Any]) -> boo
     return False
 
 
+# ---------------------------------------------------------------------------
+# Ping helpers
+# ---------------------------------------------------------------------------
+
+
+def _drain_pings(flow: Any) -> list[Ping]:
+    """Non-blocking drain of all pending pings from a flow's queue."""
+    pings: list[Ping] = []
+    while True:
+        try:
+            pings.append(flow._ping_queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    return pings
+
+
+
+# ---------------------------------------------------------------------------
+# Monitor coroutine for tool flows
+# ---------------------------------------------------------------------------
+
+
+async def _monitor_tool_flow(flow_manager: FlowManager, flow_id: str) -> None:
+    """Watch a tool flow's asyncio task; on completion, call flow_manager.complete/fail."""
+    flow = flow_manager.get(flow_id)
+    if flow is None or flow.task is None:
+        return
+    try:
+        result = await flow.task
+        flow_manager.complete(flow_id, result)
+    except asyncio.CancelledError:
+        flow_manager.cancel(flow_id)
+    except Exception as exc:
+        flow_manager.fail(flow_id, f"{type(exc).__name__}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+
 async def run(
     agent: Agent,
     task: str,
@@ -99,14 +150,22 @@ async def run(
     *,
     recorder: TaskRecorder | None = None,
     resume: bool = False,
+    flow_manager: FlowManager | None = None,
+    root_flow: Flow | None = None,
 ) -> None:
     """Run the agent loop until completion or error."""
     if not resume:
         agent.setup(task)
 
-    # Set up running tools registry
-    registry = RunningToolRegistry()
-    ctx.running_tools = registry
+    # Set up flow manager
+    if flow_manager is None:
+        flow_manager = FlowManager()
+    ctx.flow_manager = flow_manager
+
+    if root_flow is None:
+        root_flow = flow_manager.create(FlowKind.AGENT, name=agent.agent_id)
+    ctx.root_flow = root_flow
+    ctx.current_flow_id = root_flow.flow_id
 
     with ytrace.conversation(
         id=UUID(agent.task_id),
@@ -125,26 +184,7 @@ async def run(
                 agent.status = AgentStatus.DONE
                 break
 
-            # Inject finished background tools as synthetic history
-            finished = registry.collect_finished()
-            for entry in finished:
-                try:
-                    result = entry.task.result()
-                    content = str(result.output) if result.error is None else str(result.error)
-                except Exception as exc:
-                    content = f"[ERROR] {type(exc).__name__}: {exc}"
-                # Synthetic assistant tool_call + tool_result pair
-                agent.history.append(yuullm.assistant(
-                    {"type": "tool_call", "id": entry.tool_call_id,
-                     "name": "check_running_tool",
-                     "arguments": json.dumps({"handle": entry.handle})}
-                ))
-                agent.history.append(yuullm.tool(
-                    entry.tool_call_id,
-                    f"Tool completed. Output: {content}",
-                ))
-
-            # Silence detection ping
+            # Silence detection → inject user message directly
             if silence_interval_first > 0:
                 elapsed_silent = time.monotonic() - last_user_msg_time
                 threshold = (
@@ -153,20 +193,53 @@ async def run(
                     else silence_interval_subsequent
                 )
                 if elapsed_silent > threshold:
-                    total_elapsed = time.monotonic() - agent.created_at.timestamp()
-                    agent.history.append(yuullm.user(
+                    silence_msg = (
                         f"[system] 你已经工作了 {elapsed_silent:.0f}s 没有给用户发送任何消息。"
                         "请通过 im send 告知用户当前进度和预计剩余时间。"
-                    ))
+                    )
+                    agent.history.append(yuullm.user(silence_msg))
+                    chat.inject(silence_msg)
                     last_user_msg_time = time.monotonic()
 
             try:
                 tool_calls = await _step(
-                    agent, chat, ctx, recorder=recorder,
+                    agent, chat, ctx, flow_manager=flow_manager,
+                    root_flow=root_flow, recorder=recorder,
                 )
                 # Track im send for silence detection
                 if tool_calls and _has_im_send([], tool_calls):
                     last_user_msg_time = time.monotonic()
+
+                # After a text-only step, drain any pings that arrived while the
+                # LLM was generating.  This handles the race where a USER_MESSAGE
+                # ping lands in the queue just as the agent finishes its last
+                # tool-call round and the LLM decides to emit text only.
+                # Without this drain the ping would be discarded when the loop exits.
+                if not tool_calls and agent.done():
+                    pending_pings = _drain_pings(root_flow)
+                    if pending_pings:
+                        lines = [format_ping(p, flow_manager) for p in pending_pings]
+                        summary = "[system] 后台通知：\n" + "\n".join(lines)
+                        agent.history.append(yuullm.user(summary))
+                        chat.inject(summary)
+                        agent.status = AgentStatus.RUNNING  # keep the loop alive
+
+                # LLM emitted text only but children are still running —
+                # block until a child completes or a user message arrives.
+                if (
+                    not tool_calls
+                    and not agent.done()
+                    and flow_manager.has_running_children(root_flow.flow_id)
+                ):
+                    ping = await root_flow.recv(timeout=300.0)
+                    if ping is not None:
+                        ping_msg = "[system] 后台通知：\n" + format_ping(ping, flow_manager)
+                        agent.history.append(yuullm.user(ping_msg))
+                        chat.inject(ping_msg)
+                    else:
+                        # Timed out waiting — give up
+                        agent.status = AgentStatus.DONE
+
             except BaseException as exc:
                 agent.fail(exc)
                 raise
@@ -177,6 +250,8 @@ async def _step(
     chat: ytrace.ConversationContext,
     ctx: AgentContext,
     *,
+    flow_manager: FlowManager,
+    root_flow: Any,
     recorder: TaskRecorder | None = None,
 ) -> list[yuullm.ToolCall]:
     """Execute one LLM call + tool round. Returns tool_calls from this step."""
@@ -273,13 +348,36 @@ async def _step(
             ],
         )
 
-    # 3. If no tool calls, we're done
+    # 3. If no tool calls, check whether we can truly stop.
+    #    Running children (e.g. soft-timed-out tools / delegates) keep
+    #    the loop alive — the agent must wait for them to finish.
     if not tool_calls:
-        agent.status = AgentStatus.DONE
-        agent.state.pending_input_prompt = ""
+        if flow_manager.has_running_children(root_flow.flow_id):
+            agent.status = AgentStatus.RUNNING
+        else:
+            agent.status = AgentStatus.DONE
+            agent.state.pending_input_prompt = ""
         return tool_calls
 
-    # 4. Execute tools
+    # 4. Execute tools — on_pending creates child flows for timed-out tools
+    def _on_pending(
+        name: str,
+        task: asyncio.Task,  # type: ignore[type-arg]
+        buffer: OutputBuffer,
+        tool_call_id: str,
+    ) -> str:
+        child = flow_manager.create(
+            FlowKind.TOOL,
+            name=name,
+            parent_flow_id=root_flow.flow_id,
+            task=task,
+            tool_call_id=tool_call_id,
+        )
+        child._output_buffer = buffer
+        # Launch monitor coroutine that will ping parent on completion
+        asyncio.create_task(_monitor_tool_flow(flow_manager, child.flow_id))
+        return child.flow_id
+
     with chat.tools() as tools_ctx:
         calls = []
         buffers: dict[str, OutputBuffer] = {}
@@ -300,10 +398,15 @@ async def _step(
                     "params": params,
                 }
             )
+        # Exempt sleep from soft_timeout — it manages its own waiting
+        effective_soft_timeout = agent.soft_timeout
+        if all(tc.name == "sleep" for tc in tool_calls):
+            effective_soft_timeout = None
+
         results = await tools_ctx.gather(
             calls,
-            soft_timeout=agent.soft_timeout,
-            registry=ctx.running_tools,
+            soft_timeout=effective_soft_timeout,
+            on_pending=_on_pending,
             buffers=buffers,
         )
 
@@ -339,5 +442,14 @@ async def _step(
                 for r in results
             ],
         )
+
+    # 5b. Path 2: if sleep was NOT called, drain pending pings as user message
+    if not any(tc.name == "sleep" for tc in tool_calls):
+        pending_pings = _drain_pings(root_flow)
+        if pending_pings:
+            lines = [format_ping(p, flow_manager) for p in pending_pings]
+            summary = "[system] 后台通知：\n" + "\n".join(lines)
+            agent.history.append(yuullm.user(summary))
+            chat.inject(summary)
 
     return tool_calls

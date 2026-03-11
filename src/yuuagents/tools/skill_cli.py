@@ -10,7 +10,7 @@ import yuutools as yt
 from yuutools._depends import DependencyMarker
 
 from yuuagents.context import CliGuard
-from yuuagents.running_tools import OutputBuffer
+from yuuagents.flow import OutputBuffer
 
 
 _FORBIDDEN_PROGS = {

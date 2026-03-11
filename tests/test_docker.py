@@ -310,6 +310,16 @@ class TestDockerManagerProperties:
         manager = started_docker_manager
         assert len(manager.default_container_id) > 0
 
+    async def test_host_home_dir_returns_bound_host_path(
+        self, started_docker_manager: DockerManager
+    ) -> None:
+        """host_home_dir() should expose the host path bound to container_home."""
+        manager = started_docker_manager
+        host_home = await manager.host_home_dir(manager.default_container_id)
+
+        assert host_home
+        assert Path(host_home).is_absolute()
+
 
 @pytest.mark.asyncio
 class TestDockerManagerConcurrency:
