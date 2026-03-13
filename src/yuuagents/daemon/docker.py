@@ -220,9 +220,8 @@ class DockerManager:
             stderr=True,
             workdir=workdir or self.workdir,
             environment=environment,
+            user=user if user is not None else "root",
         )
-        if user is not None:
-            kwargs["user"] = user
         exe = await container.exec(**kwargs)
 
         started = exe.start()
