@@ -16,6 +16,9 @@ from yuutools import (
 from yuuagents.agent import Agent
 from yuuagents.context import AgentContext
 from yuuagents.loop import run as run_agent
+from yuuagents.loop import start as start_agent
+from yuuagents.loop import continue_ as continue_agent
+from yuuagents.loop import resume as resume_agent
 from yuuagents.types import AgentInfo, AgentStatus, SkillInfo, TaskRequest
 
 from yuuagents import tools  # noqa: F401 — yuuagents.tools.execute_bash etc.
@@ -39,6 +42,9 @@ __all__ = [
     "TaskRequest",
     "SkillInfo",
     "run_agent",
+    "start_agent",
+    "continue_agent",
+    "resume_agent",
     "tools",
     "init",
 ]

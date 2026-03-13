@@ -11,6 +11,8 @@ from uuid import UUID
 import yuullm
 import yuutrace as ytrace
 
+from loguru import logger
+
 from yuuagents.agent import Agent
 from yuuagents.context import AgentContext
 from yuuagents.flow import (
@@ -175,6 +177,69 @@ async def _monitor_tool_flow(flow_manager: FlowManager, flow_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def start(
+    agent: Agent,
+    task: str,
+    ctx: AgentContext,
+    *,
+    extra_items: list | None = None,
+    recorder: TaskRecorder | None = None,
+    flow_manager: FlowManager | None = None,
+    root_flow: Flow | None = None,
+) -> None:
+    """Start a new agent run from a task string.
+
+    Builds initial history as [system(persona), user(task)] and opens a
+    fresh trace conversation span.  extra_items appends additional content
+    blocks to the first user message (multimodal).
+    """
+    agent.setup(task, extra_items)
+    await _run(agent, task, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
+
+
+async def continue_(
+    agent: Agent,
+    message: str,
+    ctx: AgentContext,
+    *,
+    extra_items: list | None = None,
+    recorder: TaskRecorder | None = None,
+    flow_manager: FlowManager | None = None,
+    root_flow: Flow | None = None,
+) -> None:
+    """Append a new user message and continue the agent loop.
+
+    Logs only the new message to the trace — prior history is already
+    recorded in the previous span for this conversation.
+    """
+    if extra_items:
+        agent.history.append(("user", [message, *extra_items]))
+    else:
+        agent.history.append(yuullm.user(message))
+    agent.state.status = AgentStatus.RUNNING
+    await _run(agent, message, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
+
+
+async def resume(
+    agent: Agent,
+    trigger: str,
+    ctx: AgentContext,
+    *,
+    recorder: TaskRecorder | None = None,
+    flow_manager: FlowManager | None = None,
+    root_flow: Flow | None = None,
+) -> None:
+    """Run agent from its current history. Caller owns history content.
+
+    trigger is logged to the trace as the user-facing message for this turn.
+    Use this when yuubot has already computed the exact history to send
+    (e.g. merged continuation, rollover resume).
+    """
+    if agent.state.status != AgentStatus.RUNNING:
+        agent.state.status = AgentStatus.RUNNING
+    await _run(agent, trigger, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
+
+
 async def run(
     agent: Agent,
     task: str,
@@ -185,10 +250,23 @@ async def run(
     flow_manager: FlowManager | None = None,
     root_flow: Flow | None = None,
 ) -> None:
-    """Run the agent loop until completion or error."""
-    if not resume:
-        agent.setup(task)
+    """Backward-compat entry point. Prefer start() / continue_() / resume()."""
+    if resume:
+        await _run(agent, agent.task, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
+    else:
+        await start(agent, task, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
 
+
+async def _run(
+    agent: Agent,
+    trigger: str,
+    ctx: AgentContext,
+    *,
+    recorder: TaskRecorder | None = None,
+    flow_manager: FlowManager | None = None,
+    root_flow: Flow | None = None,
+) -> None:
+    """Open a trace span and run the step loop."""
     # Set up flow manager
     if flow_manager is None:
         flow_manager = FlowManager()
@@ -205,7 +283,7 @@ async def run(
         model=agent.llm.default_model,
     ) as chat:
         chat.system(persona=agent.full_system_prompt, tools=agent.tools.specs())
-        chat.user(task if not resume else agent.task)
+        chat.user(trigger)
 
         last_user_msg_time = time.monotonic()
         silence_interval_first = agent.silence_timeout or 0
@@ -238,6 +316,19 @@ async def run(
                     agent, chat, ctx, flow_manager=flow_manager,
                     root_flow=root_flow, recorder=recorder,
                 )
+                # Mid-step context compression
+                if agent.config.compressor is not None and not agent.done():
+                    old_len = len(agent.history)
+                    new_history = await agent.config.compressor.compress(
+                        agent.history, agent.state.last_input_tokens,
+                    )
+                    if new_history is not None:
+                        agent.state.history = new_history
+                        logger.info(
+                            "context compressed: {} → {} messages",
+                            old_len, len(new_history),
+                        )
+
                 # Track im send for silence detection
                 if tool_calls and _has_im_send([], tool_calls):
                     last_user_msg_time = time.monotonic()
@@ -319,6 +410,7 @@ async def _step(
                     total_tokens=usage.total_tokens,
                 ),
             )
+            agent.state.last_input_tokens = usage.input_tokens
             agent.total_tokens += usage.input_tokens + usage.output_tokens
 
         cost = store.get("cost")

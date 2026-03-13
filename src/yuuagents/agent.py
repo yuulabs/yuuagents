@@ -13,6 +13,14 @@ from attrs import define, field
 from yuuagents.types import AgentStatus, ErrorInfo
 
 
+class ContextCompressor(Protocol):
+    """Mid-step context compressor — called after each LLM step."""
+
+    async def compress(self, history: list, input_tokens: int) -> list | None:
+        """If compression needed, return new history; otherwise None."""
+        ...
+
+
 class PromptBuilder(Protocol):
     """Protocol for building system prompts."""
 
@@ -51,6 +59,7 @@ class AgentConfig:
     max_steps: int = 0  # 0 = unlimited
     soft_timeout: float | None = None  # seconds; None = disabled
     silence_timeout: float | None = None  # seconds; None = disabled
+    compressor: ContextCompressor | None = None
 
 
 @define
@@ -65,6 +74,7 @@ class AgentState:
     steps: int = 0
     total_tokens: int = 0
     total_cost_usd: float = 0.0
+    last_input_tokens: int = 0
     created_at: datetime = field(factory=lambda: datetime.now(timezone.utc))
 
 
@@ -149,14 +159,24 @@ class Agent:
         """Build the complete system prompt using the configured builder."""
         return self.config.prompt_builder.build()
 
-    def setup(self, task: str) -> None:
-        """Initialise the agent for a new task."""
+    def setup(self, task: str, extra_items: list | None = None) -> None:
+        """Initialise the agent for a new task.
+
+        extra_items: additional content blocks for the first user message
+        (e.g. image data URIs for multimodal tasks).
+        """
         self.state.task = task
         self.state.status = AgentStatus.RUNNING
-        self.state.history = [
-            yuullm.system(self.full_system_prompt),
-            yuullm.user(task),
-        ]
+        if extra_items:
+            self.state.history = [
+                yuullm.system(self.full_system_prompt),
+                ("user", [task, *extra_items]),
+            ]
+        else:
+            self.state.history = [
+                yuullm.system(self.full_system_prompt),
+                yuullm.user(task),
+            ]
 
     def fail(self, exc: BaseException) -> None:
         """Mark the agent as failed with detailed error information."""
