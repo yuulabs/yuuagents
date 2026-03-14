@@ -1,35 +1,37 @@
-"""Step loop — LLM → tool calls → trace."""
+"""Single-step execution — LLM call + tool round -> StepHandle.
+
+The host drives the loop through Session.step(); this module only provides
+internal helpers plus a convenience run() wrapper.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import time
-from typing import Any
-from uuid import UUID
+from typing import TYPE_CHECKING, Any
 
 import yuullm
 import yuutrace as ytrace
 
-from loguru import logger
-
-from yuuagents.agent import Agent
-from yuuagents.context import AgentContext
-from yuuagents.flow import (
-    Flow,
-    FlowKind,
-    FlowManager,
-    FlowStatus,
-    OutputBuffer,
-    Ping,
-    PingKind,
-    format_ping,
-)
 from yuuagents.persistence import TaskRecorder, ToolCallDTO, ToolErrorDTO, ToolResultDTO
+from yuuagents.step import (
+    AgentLoopStatus,
+    Fork,
+    ForkResult,
+    ForkStatus,
+    StepHandle,
+    StepResult,
+    ToolResult,
+    _new_fork_id,
+)
 from yuuagents.types import AgentStatus
 
+if TYPE_CHECKING:
+    from yuuagents.runtime_session import Session
 
-def _write_output_buffer(ctx: AgentContext, text: str) -> None:
+
+def _write_output_buffer(session: Session, text: str) -> None:
+    ctx = session.context
     buf = ctx.current_output_buffer or ctx.output_buffer
     if buf is None or not text:
         return
@@ -87,302 +89,50 @@ def _trace_llm_gen_items(items: list[Any]) -> list[Any]:
     return out
 
 
-def _has_im_send(results: list[ytrace.ToolResult], tool_calls: list[Any]) -> bool:
-    """Check if any tool call in this step was an im send."""
-    for tc in tool_calls:
-        if hasattr(tc, "name") and "im" in tc.name and "send" in tc.name:
-            return True
-        # Also check execute_skill_cli calls that contain "im send"
-        if hasattr(tc, "arguments") and tc.arguments:
-            try:
-                args = json.loads(tc.arguments)
-                cmd = args.get("command", "")
-                if isinstance(cmd, str) and "im send" in cmd:
-                    return True
-            except Exception:
-                pass
-    return False
-
-
 # ---------------------------------------------------------------------------
-# Ping helpers
+# Fork monitor — watches a fork's asyncio task and resolves it
 # ---------------------------------------------------------------------------
 
 
-def _drain_pings(flow: Any) -> list[Ping]:
-    """Non-blocking drain of all pending pings from a flow's queue."""
-    pings: list[Ping] = []
-    while True:
-        try:
-            pings.append(flow._ping_queue.get_nowait())
-        except asyncio.QueueEmpty:
-            break
-    return pings
-
-
-_MERGEABLE_KINDS = {PingKind.USER_MESSAGE, PingKind.SYSTEM_NOTE}
-
-
-def _merge_user_pings(pings: list[Ping]) -> list[Ping]:
-    """Merge consecutive USER_MESSAGE/SYSTEM_NOTE pings into a single USER_MESSAGE ping."""
-    result: list[Ping] = []
-    i = 0
-    while i < len(pings):
-        p = pings[i]
-        if p.kind in _MERGEABLE_KINDS:
-            parts = [p.payload]
-            first_source = p.source_flow_id
-            j = i + 1
-            while j < len(pings) and pings[j].kind in _MERGEABLE_KINDS:
-                parts.append(pings[j].payload)
-                j += 1
-            result.append(Ping(
-                kind=PingKind.USER_MESSAGE,
-                source_flow_id=first_source,
-                payload="\n".join(parts),
-            ))
-            i = j
-        else:
-            result.append(p)
-            i += 1
-    return result
-
-
-def _apply_ping(agent: Any, ping: Ping, flow_manager: FlowManager) -> None:
-    """Append a ping to the agent's history as a user message."""
-    agent.history.append(yuullm.user(ping.payload))
-
-
-# ---------------------------------------------------------------------------
-# Monitor coroutine for tool flows
-# ---------------------------------------------------------------------------
-
-
-async def _monitor_tool_flow(flow_manager: FlowManager, flow_id: str) -> None:
-    """Watch a tool flow's asyncio task; on completion, call flow_manager.complete/fail."""
-    flow = flow_manager.get(flow_id)
-    if flow is None or flow.task is None:
+async def _monitor_fork(fork: Fork) -> None:
+    """Watch a fork's task; on completion, resolve the fork."""
+    if fork._task is None:
         return
     try:
-        result = await flow.task
-        flow_manager.complete(flow_id, result)
+        result = await fork._task
+        # result is a ToolResult
+        if result.error:
+            fork._fail(str(result.error))
+        else:
+            fork._complete(result.output)
     except asyncio.CancelledError:
-        flow_manager.cancel(flow_id)
+        fork._resolve(ForkResult(error="cancelled"), ForkStatus.ERROR)
     except Exception as exc:
-        flow_manager.fail(flow_id, f"{type(exc).__name__}: {exc}")
+        fork._fail(f"{type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------------------
-# Main loop
+# step() — the only public entry point
 # ---------------------------------------------------------------------------
 
 
-async def start(
-    agent: Agent,
-    task: str,
-    ctx: AgentContext,
+async def _step_impl(
+    session: Session,
     *,
-    extra_items: list | None = None,
     recorder: TaskRecorder | None = None,
-    flow_manager: FlowManager | None = None,
-    root_flow: Flow | None = None,
-) -> None:
-    """Start a new agent run from a task string.
-
-    Builds initial history as [system(persona), user(task)] and opens a
-    fresh trace conversation span.  extra_items appends additional content
-    blocks to the first user message (multimodal).
+    chat: ytrace.ConversationContext | None = None,
+) -> StepHandle:
+    """Execute one LLM call + tool round. Returns a StepHandle.
     """
-    agent.setup(task, extra_items)
-    await _run(agent, task, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
+    handle = StepHandle()
+    session.status = AgentStatus.RUNNING
 
-
-async def continue_(
-    agent: Agent,
-    message: str,
-    ctx: AgentContext,
-    *,
-    extra_items: list | None = None,
-    recorder: TaskRecorder | None = None,
-    flow_manager: FlowManager | None = None,
-    root_flow: Flow | None = None,
-) -> None:
-    """Append a new user message and continue the agent loop.
-
-    Logs only the new message to the trace — prior history is already
-    recorded in the previous span for this conversation.
-    """
-    if extra_items:
-        agent.history.append(("user", [message, *extra_items]))
-    else:
-        agent.history.append(yuullm.user(message))
-    agent.state.status = AgentStatus.RUNNING
-    await _run(agent, message, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
-
-
-async def resume(
-    agent: Agent,
-    trigger: str,
-    ctx: AgentContext,
-    *,
-    recorder: TaskRecorder | None = None,
-    flow_manager: FlowManager | None = None,
-    root_flow: Flow | None = None,
-) -> None:
-    """Run agent from its current history. Caller owns history content.
-
-    trigger is logged to the trace as the user-facing message for this turn.
-    Use this when yuubot has already computed the exact history to send
-    (e.g. merged continuation, rollover resume).
-    """
-    if agent.state.status != AgentStatus.RUNNING:
-        agent.state.status = AgentStatus.RUNNING
-    await _run(agent, trigger, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
-
-
-async def run(
-    agent: Agent,
-    task: str,
-    ctx: AgentContext,
-    *,
-    recorder: TaskRecorder | None = None,
-    resume: bool = False,
-    flow_manager: FlowManager | None = None,
-    root_flow: Flow | None = None,
-) -> None:
-    """Backward-compat entry point. Prefer start() / continue_() / resume()."""
-    if resume:
-        await _run(agent, agent.task, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
-    else:
-        await start(agent, task, ctx, recorder=recorder, flow_manager=flow_manager, root_flow=root_flow)
-
-
-async def _run(
-    agent: Agent,
-    trigger: str,
-    ctx: AgentContext,
-    *,
-    recorder: TaskRecorder | None = None,
-    flow_manager: FlowManager | None = None,
-    root_flow: Flow | None = None,
-) -> None:
-    """Open a trace span and run the step loop."""
-    # Set up flow manager
-    if flow_manager is None:
-        flow_manager = FlowManager()
-    ctx.flow_manager = flow_manager
-
-    if root_flow is None:
-        root_flow = flow_manager.create(FlowKind.AGENT, name=agent.agent_id)
-    ctx.root_flow = root_flow
-    ctx.current_flow_id = root_flow.flow_id
-
-    with ytrace.conversation(
-        id=UUID(agent.task_id),
-        agent=agent.agent_id,
-        model=agent.llm.default_model,
-    ) as chat:
-        chat.system(persona=agent.full_system_prompt, tools=agent.tools.specs())
-        chat.user(trigger)
-
-        last_user_msg_time = time.monotonic()
-        silence_interval_first = agent.silence_timeout or 0
-        silence_interval_subsequent = max(silence_interval_first * 2.5, 300)
-
-        while not agent.done():
-            if agent.max_steps and agent.steps >= agent.max_steps:
-                agent.status = AgentStatus.DONE
-                break
-
-            # Silence detection → inject user message directly
-            if silence_interval_first > 0:
-                elapsed_silent = time.monotonic() - last_user_msg_time
-                threshold = (
-                    silence_interval_first
-                    if elapsed_silent < silence_interval_subsequent
-                    else silence_interval_subsequent
-                )
-                if elapsed_silent > threshold:
-                    silence_msg = (
-                        f"[system] 你已经工作了 {elapsed_silent:.0f}s 没有给用户发送任何消息。"
-                        "请通过 im send 告知用户当前进度和预计剩余时间。"
-                    )
-                    agent.history.append(yuullm.user(silence_msg))
-                    chat.user(silence_msg)
-                    last_user_msg_time = time.monotonic()
-
-            try:
-                tool_calls = await _step(
-                    agent, chat, ctx, flow_manager=flow_manager,
-                    root_flow=root_flow, recorder=recorder,
-                )
-                # Mid-step context compression
-                if agent.config.compressor is not None and not agent.done():
-                    old_len = len(agent.history)
-                    new_history = await agent.config.compressor.compress(
-                        agent.history, agent.state.last_input_tokens,
-                    )
-                    if new_history is not None:
-                        agent.state.history = new_history
-                        logger.info(
-                            "context compressed: {} → {} messages",
-                            old_len, len(new_history),
-                        )
-
-                # Track im send for silence detection
-                if tool_calls and _has_im_send([], tool_calls):
-                    last_user_msg_time = time.monotonic()
-
-                # After a text-only step, drain any pings that arrived while the
-                # LLM was generating.  This handles the race where a USER_MESSAGE
-                # ping lands in the queue just as the agent finishes its last
-                # tool-call round and the LLM decides to emit text only.
-                # Without this drain the ping would be discarded when the loop exits.
-                if not tool_calls and agent.done():
-                    pending_pings = _drain_pings(root_flow)
-                    if pending_pings:
-                        lines = [format_ping(p, flow_manager) for p in pending_pings]
-                        summary = "[system] 后台通知：\n" + "\n".join(lines)
-                        agent.history.append(yuullm.user(summary))
-                        chat.user(summary)
-                        agent.status = AgentStatus.RUNNING  # keep the loop alive
-
-                # LLM emitted text only but children are still running —
-                # block until a child completes or a user message arrives.
-                if (
-                    not tool_calls
-                    and not agent.done()
-                    and flow_manager.has_running_children(root_flow.flow_id)
-                ):
-                    ping = await root_flow.recv(timeout=300.0)
-                    if ping is not None:
-                        ping_msg = "[system] 后台通知：\n" + format_ping(ping, flow_manager)
-                        agent.history.append(yuullm.user(ping_msg))
-                        chat.user(ping_msg)
-                    else:
-                        # Timed out waiting — give up
-                        agent.status = AgentStatus.DONE
-
-            except BaseException as exc:
-                agent.fail(exc)
-                raise
-
-
-async def _step(
-    agent: Agent,
-    chat: ytrace.ConversationContext,
-    ctx: AgentContext,
-    *,
-    flow_manager: FlowManager,
-    root_flow: Any,
-    recorder: TaskRecorder | None = None,
-) -> list[yuullm.ToolCall]:
-    """Execute one LLM call + tool round. Returns tool_calls from this step."""
     # 1. Call LLM
-    with chat.llm_gen() as gen:
-        stream, store = await agent.llm.stream(
-            agent.history,
-            tools=agent.tools.specs(),
+    gen = chat.start_llm_gen() if chat else None
+    try:
+        stream, store = await session.config.llm.stream(
+            session.llm_history(),
+            tools=session.config.tools.specs(),
         )
 
         items: list[Any] = []
@@ -390,10 +140,13 @@ async def _step(
             items.append(item)
             match item:
                 case yuullm.Response(item=i) if isinstance(i, str):
-                    _write_output_buffer(ctx, i)
+                    handle._append_stem(i)
+                    _write_output_buffer(session, i)
                 case yuullm.ToolCall() as tc:
-                    _write_output_buffer(ctx, f"\n[calling {tc.name}]\n")
-        gen.log(_trace_llm_gen_items(items))
+                    _write_output_buffer(session, f"\n[calling {tc.name}]\n")
+
+        if gen is not None:
+            gen.log(_trace_llm_gen_items(items))
 
         # Record usage & cost
         usage = store.get("usage")
@@ -410,8 +163,8 @@ async def _step(
                     total_tokens=usage.total_tokens,
                 ),
             )
-            agent.state.last_input_tokens = usage.input_tokens
-            agent.total_tokens += usage.input_tokens + usage.output_tokens
+            session.last_input_tokens = usage.input_tokens
+            session.total_tokens += usage.input_tokens + usage.output_tokens
 
         cost = store.get("cost")
         if cost is not None:
@@ -424,9 +177,12 @@ async def _step(
                 llm_model=usage.model if usage else "",
                 llm_request_id=usage.request_id if usage else None,
             )
-            agent.total_cost_usd += cost.total_cost
+            session.total_cost_usd += cost.total_cost
+    finally:
+        if gen is not None:
+            gen.end()
 
-    agent.steps += 1
+    session.steps += 1
 
     # 2. Separate tool calls from text
     tool_calls: list[yuullm.ToolCall] = []
@@ -439,9 +195,9 @@ async def _step(
                 if isinstance(i, str):
                     text_parts.append(i)
             case yuullm.Reasoning():
-                pass  # reasoning is logged but not appended
+                pass
 
-    # Build assistant message items
+    # Build assistant message
     assistant_items: list[yuullm.Item] = []
     full_text = "".join(text_parts)
     if full_text:
@@ -458,13 +214,13 @@ async def _step(
 
     if assistant_items:
         assistant_msg = yuullm.assistant(*assistant_items)
-        agent.history.append(assistant_msg)
+        session.history.append(assistant_msg)
     else:
         assistant_msg = None
 
     if recorder is not None:
         await recorder.record_llm(
-            turn=agent.steps,
+            turn=session.steps,
             history_append=assistant_msg,
             tool_calls=[
                 ToolCallDTO(call_id=tc.id, name=tc.name, args_json=tc.arguments or "")
@@ -472,108 +228,150 @@ async def _step(
             ],
         )
 
-    # 3. If no tool calls, check whether we can truly stop.
-    #    Running children (e.g. soft-timed-out tools / delegates) keep
-    #    the loop alive — the agent must wait for them to finish.
+    handle._finish_stem()
+
+    # 3. No tool calls -> done
     if not tool_calls:
-        if flow_manager.has_running_children(root_flow.flow_id):
-            agent.status = AgentStatus.RUNNING
-        else:
-            agent.status = AgentStatus.DONE
-            agent.state.pending_input_prompt = ""
-        return tool_calls
-
-    # 4. Execute tools — on_pending creates child flows for timed-out tools
-    def _on_pending(
-        name: str,
-        task: asyncio.Task,  # type: ignore[type-arg]
-        buffer: OutputBuffer,
-        tool_call_id: str,
-    ) -> str:
-        child = flow_manager.create(
-            FlowKind.TOOL,
-            name=name,
-            parent_flow_id=root_flow.flow_id,
-            task=task,
-            tool_call_id=tool_call_id,
-        )
-        child._output_buffer = buffer
-        # Launch monitor coroutine that will ping parent on completion
-        asyncio.create_task(_monitor_tool_flow(flow_manager, child.flow_id))
-        return child.flow_id
-
-    with chat.tools() as tools_ctx:
-        calls = []
-        buffers: dict[str, OutputBuffer] = {}
-        for tc in tool_calls:
-            tool_obj = agent.tools[tc.name]
-            # Create per-call output buffer for streaming capture
-            buf = OutputBuffer()
-            ctx.current_output_buffer = buf
-            bound = tool_obj.bind(ctx)
-            ctx.current_output_buffer = None
-            params = json.loads(tc.arguments) if tc.arguments else {}
-            buffers[tc.id] = buf
-            calls.append(
-                {
-                    "tool_call_id": tc.id,
-                    "name": tc.name,
-                    "tool": bound.run,
-                    "params": params,
-                }
+        session.status = AgentStatus.DONE
+        handle._mark_done(
+            StepResult(
+                status=AgentLoopStatus.DONE,
+                text=full_text,
+                tool_names=[],
             )
-        # Exempt sleep from soft_timeout — it manages its own waiting
-        effective_soft_timeout = agent.soft_timeout
-        if all(tc.name == "sleep" for tc in tool_calls):
-            effective_soft_timeout = None
-
-        results = await tools_ctx.gather(
-            calls,
-            soft_timeout=effective_soft_timeout,
-            on_pending=_on_pending,
-            buffers=buffers,
         )
+        return handle
 
-    # 5. Append tool results to history
-    for r in results:
-        if r.error:
-            content = str(r.error)
-        elif isinstance(r.output, list):
-            content = r.output  # multimodal content blocks — passthrough
-        else:
-            content = str(r.output)
-        agent.history.append(yuullm.tool(r.tool_call_id, content))
-    if agent.status not in (AgentStatus.DONE, AgentStatus.ERROR, AgentStatus.CANCELLED):
-        agent.status = AgentStatus.RUNNING
+    # 4. Execute tools — create forks
+    calls = []
+    unknown_results: list[ToolResult] = []
+    for tc in tool_calls:
+        try:
+            tool_obj = session.config.tools[tc.name]
+        except KeyError as exc:
+            unknown_results.append(
+                ToolResult(tool_call_id=tc.id, output="", error=str(exc))
+            )
+            continue
+        bound = tool_obj.bind(session.context)
+        params = json.loads(tc.arguments) if tc.arguments else {}
+        calls.append((tc, bound, params))
+
+    # Handle unknown tool results immediately
+    for r in unknown_results:
+        session.history.append(yuullm.tool(r.tool_call_id, str(r.error)))
+
+    # Execute all known tools concurrently as forks
+    for tc, bound, params in calls:
+        fork_id = _new_fork_id()
+        task = asyncio.create_task(
+            _run_tool(bound, params, tc.id),
+            name=f"fork-{tc.name}-{fork_id}",
+        )
+        fork = Fork(
+            id=fork_id,
+            name=tc.name,
+            tool_call_id=tc.id,
+            task=task,
+        )
+        handle._add_fork(fork)
+        asyncio.create_task(_monitor_fork(fork))
+
+    # Spawn background finalizer — waits for forks, appends results, marks done
+    asyncio.create_task(_finalize_step(handle, session, full_text, recorder))
+
+    return handle
+
+
+async def _finalize_step(
+    handle: StepHandle,
+    session: Session,
+    full_text: str,
+    recorder: TaskRecorder | None,
+) -> None:
+    """Background task: wait for all forks, append results to history, mark done."""
+    await asyncio.gather(*[f.join() for f in handle.forks])
+
+    tool_names: list[str] = []
+    for fork in handle.forks:
+        tool_names.append(fork.name)
+        if fork.result is not None:
+            if fork.result.error:
+                session.history.append(
+                    yuullm.tool(fork.tool_call_id, str(fork.result.error))
+                )
+            elif isinstance(fork.result.output, list):
+                session.history.append(
+                    yuullm.tool(fork.tool_call_id, fork.result.output)
+                )
+            else:
+                session.history.append(
+                    yuullm.tool(fork.tool_call_id, str(fork.result.output))
+                )
 
     if recorder is not None:
         await recorder.record_tool(
-            turn=agent.steps,
+            turn=session.steps,
             results=[
                 ToolResultDTO(
-                    call_id=r.tool_call_id,
-                    ok=r.error is None,
-                    output_text=str(r.output) if r.error is None else "",
+                    call_id=fork.tool_call_id,
+                    ok=fork.result is not None and fork.result.error is None,
+                    output_text=str(fork.result.output)
+                    if fork.result and fork.result.error is None
+                    else "",
                     error=(
                         None
-                        if r.error is None
+                        if fork.result is None or fork.result.error is None
                         else ToolErrorDTO(
-                            type=type(r.error).__name__,
-                            message=str(r.error),
+                            type="ToolError", message=str(fork.result.error)
                         )
                     ),
                 )
-                for r in results
+                for fork in handle.forks
             ],
         )
 
-    # 5b. Path 2: if sleep was NOT called, drain pending pings as user message
-    if not any(tc.name == "sleep" for tc in tool_calls):
-        pending_pings = _drain_pings(root_flow)
-        if pending_pings:
-            lines = [format_ping(p, flow_manager) for p in pending_pings]
-            summary = "[system] 后台通知：\n" + "\n".join(lines)
-            agent.history.append(yuullm.user(summary))
-            chat.user(summary)
+    session.status = AgentStatus.RUNNING
+    handle._mark_done(
+        StepResult(
+            status=AgentLoopStatus.RUNNING,
+            text=full_text,
+            tool_names=tool_names,
+        )
+    )
 
-    return tool_calls
+
+async def run(
+    session: Session,
+    *,
+    task: str | None = None,
+    recorder: TaskRecorder | None = None,
+) -> None:
+    """Drive a session until completion."""
+    if task is not None:
+        session.init([task])
+    while True:
+        handle = await session.step(recorder=recorder)
+        result = await handle.join()
+        if result.status == AgentLoopStatus.DONE:
+            return
+        if session.config.max_steps and session.steps >= session.config.max_steps:
+            session.status = AgentStatus.DONE
+            return
+
+
+async def _run_tool(
+    bound: Any,
+    params: dict[str, Any],
+    tool_call_id: str,
+) -> ToolResult:
+    """Run a single tool and return a ToolResult."""
+    try:
+        output = await bound.run(**params)
+        return ToolResult(tool_call_id=tool_call_id, output=output)
+    except Exception as exc:
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            output="",
+            error=f"{type(exc).__name__}: {exc}",
+        )
