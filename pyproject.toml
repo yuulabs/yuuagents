@@ -64,6 +64,6 @@ module = "skills_ref.*"
 ignore_missing_imports = true
 
 [tool.uv.sources]
-yuullm = { path = "../yuullm", editable = true }
-yuutrace = { path = "../yuutrace", editable = true }
-yuutools = { path = "../yuutools", editable = true }
+yuullm = { workspace = true }
+yuutrace = { workspace = true }
+yuutools = { workspace = true }

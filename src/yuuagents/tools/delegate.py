@@ -8,6 +8,17 @@ from yuuagents.context import (
     DelegateDepthExceededError,
     DelegateManager,
 )
+from yuuagents.runtime_session import Session
+
+
+def _last_assistant_text(session: Session) -> str:
+    for role, items in reversed(session.history):
+        if role != "assistant":
+            continue
+        text = "".join(item for item in items if isinstance(item, str)).strip()
+        if text:
+            return text
+    return ""
 
 
 @yt.tool(
@@ -20,7 +31,7 @@ from yuuagents.context import (
     description=(
         "Delegate work to another configured agent. "
         "Combines context and task into the delegated agent's first user message. "
-        "Returns only the delegated agent's final text response."
+        "Returns the delegated agent's final text response."
     ),
 )
 async def delegate(
@@ -29,44 +40,39 @@ async def delegate(
     task: str,
     tools: list[str] | None = None,
     manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
-    caller_agent: str = yt.depends(lambda ctx: ctx.agent_id),
+    parent: object | None = yt.depends(lambda ctx: ctx.session),
+    parent_run_id: str = yt.depends(lambda ctx: ctx.current_run_id),
     delegate_depth: int = yt.depends(lambda ctx: ctx.delegate_depth),
-    output_buffer=yt.depends(lambda ctx: ctx.current_output_buffer),
 ) -> str:
-    assert isinstance(caller_agent, str)
-    caller_agent = caller_agent.strip()
-    assert caller_agent
-    assert isinstance(agent, str)
-    agent = agent.strip()
-    assert agent
-    if delegate_depth >= 3:
+    if manager is None:
+        return "[ERROR] delegate manager unavailable"
+    if parent is None:
+        return "[ERROR] delegate requires an active parent session"
+
+    next_depth = delegate_depth + 1
+    if next_depth > 3:
         raise DelegateDepthExceededError(
             max_depth=3,
             current_depth=delegate_depth,
             target_agent=agent,
         )
 
-    assert isinstance(context, str)
-    assert isinstance(task, str)
-    task = task.strip()
-    assert task
-
-    if tools is not None:
-        assert isinstance(tools, list)
-        assert all(isinstance(t, str) and t.strip() for t in tools)
-
-    assert manager is not None
-
-    ctx_text = context.strip()
     first_user_message = (
-        task if not ctx_text else f"context:\n{ctx_text}\n\ntask:\n{task}"
+        f"Context:\n{context.strip()}\n\nTask:\n{task.strip()}"
+        if context.strip()
+        else task.strip()
     )
-
-    return await manager.delegate(
-        caller_agent=caller_agent,
+    child = await manager.start_delegate(
+        parent=parent,
+        parent_run_id=parent_run_id,
         agent=agent,
         first_user_message=first_user_message,
         tools=tools,
-        delegate_depth=delegate_depth + 1,
-        output_buffer=output_buffer,
+        delegate_depth=next_depth,
     )
+    assert isinstance(child, Session)
+    try:
+        await child.wait()
+    except BaseException:
+        pass
+    return _last_assistant_text(child) or child.status.value

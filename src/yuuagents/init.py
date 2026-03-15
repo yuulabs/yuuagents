@@ -192,11 +192,7 @@ async def setup(config: str | Path | Config) -> Config:
     # -- Step 1: create directories --
     logger.info("Creating directories ...")
     YAGENTS_HOME.mkdir(parents=True, exist_ok=True)
-    (YAGENTS_HOME / "skills").mkdir(exist_ok=True)
     (YAGENTS_HOME / "dockers").mkdir(exist_ok=True)
-
-    for sp in cfg.skills.paths:
-        Path(sp).expanduser().mkdir(parents=True, exist_ok=True)
 
     db_path = cfg.sqlite_path
     if db_path is not None:
@@ -271,4 +267,3 @@ async def setup(config: str | Path | Config) -> Config:
             )
 
     return cfg
-

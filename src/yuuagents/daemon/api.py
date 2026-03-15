@@ -106,13 +106,6 @@ def create_app(
             return _json({"error": "not found"}, status=404)
         return _json({"ok": True})
 
-    async def list_skills(request: Request) -> Response:
-        return _json(manager.skills())
-
-    async def scan_skills(request: Request) -> Response:
-        refreshed = manager.rescan_skills()
-        return _json(refreshed)
-
     async def get_config(request: Request) -> Response:
         # Return sanitised config (no secrets)
         cfg = manager.config
@@ -130,7 +123,6 @@ def create_app(
                 "docker_image": cfg.docker.image,
                 "providers": providers_summary,
                 "agents": agents_summary,
-                "skill_paths": cfg.skills.paths,
             }
         )
 
@@ -154,8 +146,6 @@ def create_app(
         Route("/api/agents/{task_id}/history", get_history, methods=["GET"]),
         Route("/api/agents/{task_id}/input", post_input, methods=["POST"]),
         Route("/api/agents/{task_id}", delete_agent, methods=["DELETE"]),
-        Route("/api/skills", list_skills, methods=["GET"]),
-        Route("/api/skills/scan", scan_skills, methods=["POST"]),
         Route("/api/config", get_config, methods=["GET"]),
         Route("/api/config/reload", reload_config, methods=["POST"]),
     ]

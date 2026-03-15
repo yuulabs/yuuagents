@@ -13,13 +13,10 @@ from yuutools import (
 )
 
 # yuuagents own symbols
-from yuuagents.agent import Agent
+from yuuagents.agent import AgentConfig
 from yuuagents.context import AgentContext
-from yuuagents.loop import run as run_agent
-from yuuagents.loop import start as start_agent
-from yuuagents.loop import continue_ as continue_agent
-from yuuagents.loop import resume as resume_agent
-from yuuagents.types import AgentInfo, AgentStatus, SkillInfo, TaskRequest
+from yuuagents.runtime_session import Session
+from yuuagents.types import AgentInfo, AgentStatus, TaskRequest
 
 from yuuagents import tools  # noqa: F401 — yuuagents.tools.execute_bash etc.
 from yuuagents import init  # noqa: F401 — yuuagents.init.setup
@@ -35,16 +32,12 @@ __all__ = [
     "depends",
     "DependencyMarker",
     # from yuuagents
-    "Agent",
+    "AgentConfig",
     "AgentContext",
+    "Session",
     "AgentStatus",
     "AgentInfo",
     "TaskRequest",
-    "SkillInfo",
-    "run_agent",
-    "start_agent",
-    "continue_agent",
-    "resume_agent",
     "tools",
     "init",
 ]

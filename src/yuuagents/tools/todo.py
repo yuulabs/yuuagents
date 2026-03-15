@@ -10,9 +10,9 @@ import yuutools as yt
 @yt.tool(
     params={
         "items": (
-            'JSON array of task items, e.g. '
+            "JSON array of task items, e.g. "
             '[{"task": "搜索资料", "status": "done"}, {"task": "写代码", "status": "in_progress"}]. '
-            'Valid statuses: pending, in_progress, done, skipped'
+            "Valid statuses: pending, in_progress, done, skipped"
         ),
     },
     description=(

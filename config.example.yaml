@@ -105,7 +105,7 @@ agents:
     tools:
       - execute_bash
       - read_file
-      - write_file
+      - edit_file
       - delete_file
       - web_search
     skills:
@@ -122,4 +122,4 @@ agents:
     tools:
       - web_search
       - read_file
-      - write_file
+      - edit_file

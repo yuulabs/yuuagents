@@ -6,6 +6,7 @@ import enum
 from datetime import datetime
 
 import msgspec
+import yuullm
 
 
 class AgentStatus(str, enum.Enum):
@@ -33,7 +34,7 @@ class TaskRequest(msgspec.Struct, frozen=True, kw_only=True):
     """Payload for POST /api/agents.
 
     ``agent`` selects a named agent configuration (provider, model, tools,
-    skills, persona).  Defaults to ``"main"``.
+    persona).  Defaults to ``"main"``.
 
     ``persona`` optionally overrides the system prompt from the agent config.
     If empty, the persona from the agent config is used.  If no agent config
@@ -44,7 +45,6 @@ class TaskRequest(msgspec.Struct, frozen=True, kw_only=True):
     persona: str = ""
     task: str
     tools: list[str] = msgspec.field(default_factory=list)
-    skills: list[str] = msgspec.field(default_factory=list)
     model: str = ""
     container: str = ""
     image: str = ""
@@ -63,13 +63,8 @@ class AgentInfo(msgspec.Struct, frozen=True, kw_only=True):
     pending_input_prompt: str = ""
     steps: int = 0
     total_tokens: int = 0
+    last_usage: yuullm.Usage | None = None
+    total_usage: yuullm.Usage | None = None
+    last_cost_usd: float = 0.0
     total_cost_usd: float = 0.0
     error: ErrorInfo | None = None
-
-
-class SkillInfo(msgspec.Struct, frozen=True, kw_only=True):
-    """Metadata for a discovered Agent Skill."""
-
-    name: str
-    description: str
-    location: str

@@ -10,20 +10,98 @@ import re
 import shlex
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import aiodocker
 from aiodocker.exceptions import DockerError
 from attrs import define, field
 from loguru import logger
 
-if TYPE_CHECKING:
-    from yuuagents.flow import OutputBuffer
-
 _DOCKERS_ROOT = Path("~/.yagents/dockers").expanduser()
 
-_PROXY_KEYS = ("http_proxy", "https_proxy", "no_proxy",
-               "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY")
+
+@define
+class PendingCommand:
+    """A soft-timed-out command still running in a tmux session.
+
+    Owns the single ``tmux wait-for`` call so no two consumers can
+    race on the one-shot tmux channel signal.
+    """
+
+    token: str
+    channel: str
+    container_id: str
+    session_name: str
+    _docker: "DockerManager"
+    _timeout: int
+    _task: asyncio.Task[str] = field(init=False, default=None)
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    @property
+    def done(self) -> bool:
+        return self._task is not None and self._task.done()
+
+    async def wait(self) -> str:
+        """Await the result.  Safe to call multiple times; cancelling
+        this coroutine does NOT cancel the underlying task."""
+        return await asyncio.shield(self._task)
+
+    def partial(self, capture: str) -> str | None:
+        """Extract partial output from a capture-pane snapshot."""
+        begin = f"__YAGENTS_BEGIN__={self.token}"
+        end_prefix = f"__YAGENTS_END__={self.token}"
+        return DockerManager._extract_tmux_body(
+            capture=capture, begin=begin, end_prefix=end_prefix,
+        )
+
+    async def _run(self) -> str:
+        """Single background coroutine: wait-for → capture → parse."""
+        begin = f"__YAGENTS_BEGIN__={self.token}"
+        end_prefix = f"__YAGENTS_END__={self.token}"
+        q_channel = shlex.quote(self.channel)
+        cmd = f"tmux wait-for {q_channel}"
+
+        timed_out = False
+        try:
+            result = await self._docker._exec_with_shell(
+                self.container_id, "bash", cmd, max(1, self._timeout),
+            )
+            timed_out = "[ERROR] Command timed out" in result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            timed_out = True
+
+        if not timed_out:
+            cap = await self._docker.capture_terminal(
+                self.container_id,
+                self._session_id_from_name(),
+            )
+            if DockerManager._has_end_marker(cap, end_prefix):
+                return DockerManager._parse_completed_output(cap, begin, end_prefix)
+            # Marker missing despite signal — fall through to interrupt.
+
+        await self._docker._interrupt_tmux_command(
+            self.container_id, self.session_name, channel=self.channel,
+        )
+        return f"[ERROR] Pending command timed out after {self._timeout}s"
+
+    def _session_id_from_name(self) -> str:
+        """Reverse the session_name back to a session_id for capture_terminal."""
+        # session_name == "yag_<safe_id>", capture_terminal expects the raw id
+        # but it will re-derive the same session_name, so we just strip prefix.
+        return self.session_name.removeprefix("yag_")
+
+
+_PROXY_KEYS = (
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+)
 
 
 def _proxy_env() -> dict[str, str]:
@@ -60,6 +138,9 @@ class DockerManager:
     )
     _tooling_ready: set[str] = field(factory=set, repr=False)
     _tooling_locks: dict[str, asyncio.Lock] = field(factory=dict, repr=False)
+    _pending_commands: dict[tuple[str, str], PendingCommand] = field(
+        factory=dict, repr=False
+    )
 
     @property
     def workdir(self) -> str:
@@ -176,7 +257,8 @@ class DockerManager:
         session_id: str,
         command: str,
         timeout: int,
-        output_buffer: OutputBuffer | None = None,
+        *,
+        soft_timeout: int | None = None,
     ) -> str:
         await self._ensure_started()
         assert isinstance(session_id, str) and session_id
@@ -196,8 +278,84 @@ class DockerManager:
                 session_name=session_name,
                 command=command,
                 timeout=timeout,
-                output_buffer=output_buffer,
+                soft_timeout=soft_timeout,
             )
+
+    def get_pending(
+        self,
+        container_id: str,
+        session_id: str,
+    ) -> PendingCommand | None:
+        """Return the PendingCommand for this terminal, if any."""
+        session_name = self._terminal_session_name(session_id)
+        key = (container_id, session_name)
+        return self._pending_commands.get(key)
+
+    async def resume_pending(
+        self,
+        container_id: str,
+        session_id: str,
+        timeout: int,
+    ) -> str:
+        """Wait for a previously soft-timed-out command to complete.
+
+        Delegates entirely to the ``PendingCommand`` task which owns
+        the single ``tmux wait-for`` call.
+        """
+        session_name = self._terminal_session_name(session_id)
+        key = (container_id, session_name)
+        pending = self._pending_commands.pop(key, None)
+        if pending is None:
+            return "[ERROR] No pending command to resume"
+        return await pending.wait()
+
+    async def write_terminal(
+        self,
+        container_id: str,
+        session_id: str,
+        data: str,
+        *,
+        append_newline: bool = True,
+    ) -> str:
+        await self._ensure_started()
+        assert isinstance(session_id, str) and session_id
+
+        session_name = self._terminal_session_name(session_id)
+        key = (container_id, session_name)
+        lock = self._terminal_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._terminal_locks[key] = lock
+
+        async with lock:
+            await self._ensure_required_tooling(container_id)
+            await self._ensure_tmux_session(container_id, session_name)
+            q_sess = shlex.quote(session_name)
+            payload = f"tmux send-keys -t {q_sess} -l {shlex.quote(data)}"
+            if append_newline:
+                payload += f"; tmux send-keys -t {q_sess} C-m"
+            await self._exec_with_shell(container_id, "bash", payload, 30)
+        return f"Input sent to terminal session {session_id}"
+
+    async def capture_terminal(
+        self,
+        container_id: str,
+        session_id: str,
+    ) -> str:
+        """One-shot capture of the terminal pane content.
+
+        Does **not** acquire ``_terminal_locks`` — ``capture-pane`` is a
+        read-only operation that can safely run concurrently with
+        ``send-keys``.
+        """
+        session_name = self._terminal_session_name(session_id)
+        q_sess = shlex.quote(session_name)
+        return await self._exec_with_shell(
+            container_id,
+            "bash",
+            f"tmux capture-pane -p -t {q_sess} -S -2000",
+            10,
+        )
 
     async def _exec_with_shell(
         self,
@@ -238,9 +396,7 @@ class DockerManager:
             except Exception:
                 pass
 
-        async def _read_all(
-            output_buffer: OutputBuffer | None = None,
-        ) -> bytes:
+        async def _read_all() -> bytes:
             chunks: list[bytes] = []
             try:
                 while True:
@@ -250,8 +406,6 @@ class DockerManager:
                     data = getattr(msg, "data", b"")
                     if data:
                         chunks.append(data)
-                        if output_buffer is not None:
-                            output_buffer.write(data)
             finally:
                 await _close_stream()
             return b"".join(chunks)
@@ -318,7 +472,6 @@ need_cmd rm
 need_cmd mkdir
 need_cmd dirname
 
-test -x /usr/local/bin/yagents-apply-patch || missing="$missing yagents-apply-patch"
 
 echo "$missing"
 """
@@ -382,69 +535,10 @@ echo "$missing"
         out = await self._exec_with_shell(container_id, "bash", create, 30)
         assert self._parse_exit_code_marker(out) == 0, out
 
-    async def _exec_tmux_command(
-        self,
-        *,
-        container_id: str,
-        session_name: str,
-        command: str,
-        timeout: int,
-        output_buffer: OutputBuffer | None = None,
-    ) -> str:
-        token = uuid.uuid4().hex
-        cmd_b64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
-        begin = f"__YAGENTS_BEGIN__={token}"
-        end_prefix = f"__YAGENTS_END__={token}"
-
-        payload = (
-            f"printf '\\n{begin}\\n'; "
-            f"__y_cmd=$(printf %s {cmd_b64} | base64 -d); "
-            f'eval "$__y_cmd"; __y_code=$?; '
-            f"printf '\\n{end_prefix} __YAGENTS_EXIT_CODE__=%s\\n' \"$__y_code\""
-        )
-
-        q_sess = shlex.quote(session_name)
-        send = (
-            f"tmux send-keys -t {q_sess} -l {shlex.quote(payload)};"
-            f" tmux send-keys -t {q_sess} C-m"
-        )
-        await self._exec_with_shell(container_id, "bash", send, 30)
-
-        deadline = asyncio.get_running_loop().time() + max(1, timeout)
-        last_capture = ""
-        streamed_body = ""
-        try:
-            while True:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    await self._interrupt_tmux_command(container_id, session_name)
-                    return f"[ERROR] Command timed out after {timeout}s"
-
-                cap = await self._exec_with_shell(
-                    container_id,
-                    "bash",
-                    f"tmux capture-pane -p -t {q_sess} -S -2000",
-                    int(min(10, max(1, remaining))),
-                )
-                last_capture = cap
-                body = self._extract_tmux_body(
-                    capture=cap,
-                    begin=begin,
-                    end_prefix=end_prefix,
-                )
-                if body is not None and output_buffer is not None:
-                    delta = body[len(streamed_body):]
-                    if delta:
-                        output_buffer.write(delta.encode("utf-8", errors="replace"))
-                    streamed_body = body
-                if end_prefix in cap:
-                    break
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            await self._interrupt_tmux_command(container_id, session_name)
-            raise
-
-        lines = last_capture.splitlines()
+    @staticmethod
+    def _parse_completed_output(capture: str, begin: str, end_prefix: str) -> str:
+        """Extract body and exit code from a completed tmux capture."""
+        lines = capture.splitlines()
         begin_idx = -1
         end_idx = -1
         for i, line in enumerate(lines):
@@ -453,7 +547,9 @@ echo "$missing"
             if line.strip().startswith(end_prefix):
                 end_idx = i
 
-        assert begin_idx != -1 and end_idx != -1 and end_idx >= begin_idx, last_capture
+        assert (
+            begin_idx != -1 and end_idx != -1 and end_idx >= begin_idx
+        ), capture
 
         end_line = lines[end_idx].strip()
         code = 0
@@ -466,6 +562,123 @@ echo "$missing"
         if code != 0:
             return f"{body}\n[exit code: {code}]".strip()
         return body
+
+    @staticmethod
+    def _has_end_marker(capture: str, end_prefix: str) -> bool:
+        """Check whether the END marker appears on its own line."""
+        return any(
+            line.strip().startswith(end_prefix) for line in capture.splitlines()
+        )
+
+    async def _poll_tmux_until(
+        self,
+        container_id: str,
+        session_name: str,
+        begin: str,
+        end_prefix: str,
+        deadline: float,
+    ) -> tuple[str, bool]:
+        """Poll tmux capture until END marker appears or deadline is reached.
+
+        Returns ``(last_capture, completed)``.
+        """
+        q_sess = shlex.quote(session_name)
+        last_capture = ""
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return last_capture, False
+
+            cap = await self._exec_with_shell(
+                container_id,
+                "bash",
+                f"tmux capture-pane -p -t {q_sess} -S -2000",
+                int(min(10, max(1, remaining))),
+            )
+            last_capture = cap
+            if self._has_end_marker(cap, end_prefix):
+                return last_capture, True
+            await asyncio.sleep(0.1)
+
+    @staticmethod
+    def _wait_channel(token: str) -> str:
+        return f"yag_done_{token}"
+
+    async def _exec_tmux_command(
+        self,
+        *,
+        container_id: str,
+        session_name: str,
+        command: str,
+        timeout: int,
+        soft_timeout: int | None = None,
+    ) -> str:
+        token = uuid.uuid4().hex
+        cmd_b64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
+        begin = f"__YAGENTS_BEGIN__={token}"
+        end_prefix = f"__YAGENTS_END__={token}"
+        channel = self._wait_channel(token)
+
+        payload = (
+            f"printf '\\n{begin}\\n'; "
+            f"__y_cmd=$(printf %s {cmd_b64} | base64 -d); "
+            f'eval "$__y_cmd"; __y_code=$?; '
+            f"printf '\\n{end_prefix} __YAGENTS_EXIT_CODE__=%s\\n' \"$__y_code\"; "
+            f"tmux wait-for -S {shlex.quote(channel)}"
+        )
+
+        q_sess = shlex.quote(session_name)
+        send = (
+            f"tmux send-keys -t {q_sess} -l {shlex.quote(payload)};"
+            f" tmux send-keys -t {q_sess} C-m"
+        )
+        await self._exec_with_shell(container_id, "bash", send, 30)
+
+        # Use soft_timeout as the initial deadline if provided;
+        # the hard timeout is used for _resume_pending later.
+        effective = soft_timeout if soft_timeout is not None else timeout
+        deadline = asyncio.get_running_loop().time() + max(1, effective)
+
+        try:
+            last_capture, completed = await self._poll_tmux_until(
+                container_id, session_name, begin, end_prefix, deadline
+            )
+        except asyncio.CancelledError:
+            await self._interrupt_tmux_command(
+                container_id, session_name, channel=channel
+            )
+            raise
+
+        if completed:
+            return self._parse_completed_output(last_capture, begin, end_prefix)
+
+        # Timeout path
+        if soft_timeout is not None:
+            # Soft timeout: create PendingCommand that owns the wait lifecycle.
+            key = (container_id, session_name)
+            pending = PendingCommand(
+                token=token,
+                channel=channel,
+                container_id=container_id,
+                session_name=session_name,
+                docker=self,
+                timeout=timeout,
+            )
+            pending.start()
+            self._pending_commands[key] = pending
+            partial = self._extract_tmux_body(
+                capture=last_capture, begin=begin, end_prefix=end_prefix
+            )
+            return (
+                f"[SOFT_TIMEOUT] Command is still running.\n{partial or ''}"
+            ).rstrip()
+
+        # Hard timeout: kill the command.
+        await self._interrupt_tmux_command(
+            container_id, session_name, channel=channel
+        )
+        return f"[ERROR] Command timed out after {timeout}s"
+
 
     @staticmethod
     def _extract_tmux_body(
@@ -489,13 +702,24 @@ echo "$missing"
             return "\n".join(lines[begin_idx + 1 :]).strip()
         return "\n".join(lines[begin_idx + 1 : end_idx]).strip()
 
-    async def _interrupt_tmux_command(self, container_id: str, session_name: str) -> None:
+    async def _interrupt_tmux_command(
+        self,
+        container_id: str,
+        session_name: str,
+        *,
+        channel: str | None = None,
+    ) -> None:
         q_sess = shlex.quote(session_name)
         try:
+            cmd = f"tmux send-keys -t {q_sess} C-c"
+            if channel:
+                # Release any blocking `tmux wait-for` listener so the
+                # docker-exec process doesn't become an orphan.
+                cmd += f"; tmux wait-for -S {shlex.quote(channel)}"
             await self._exec_with_shell(
                 container_id,
                 "bash",
-                f"tmux send-keys -t {q_sess} C-c",
+                cmd,
                 5,
             )
         except Exception:

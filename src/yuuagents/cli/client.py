@@ -87,15 +87,6 @@ class YAgentsClient:
         resp.raise_for_status()
         return resp.json()
 
-    # -- skills --
-
-    def skills(self) -> list[dict[str, Any]]:
-        return self._request("GET", "/api/skills").json()
-
-    def scan_skills(self) -> list[dict[str, Any]]:
-        resp = self._request("POST", "/api/skills/scan")
-        return resp.json()
-
     # -- config --
 
     def get_config(self) -> dict[str, Any]:

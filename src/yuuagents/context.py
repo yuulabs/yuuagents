@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import TYPE_CHECKING, Callable, Protocol
+from attrs import evolve
+from typing import Any, Protocol
 
 from attrs import define, field
-
-if TYPE_CHECKING:
-    from yuuagents.agent import AgentState
-    from yuuagents.flow import Flow, FlowManager, OutputBuffer
 
 
 class DockerExecutor(Protocol):
@@ -20,52 +16,86 @@ class DockerExecutor(Protocol):
         session_id: str,
         command: str,
         timeout: int,
-        output_buffer: OutputBuffer | None = None,
+        *,
+        soft_timeout: int | None = None,
+    ) -> str: ...
+    def get_pending(
+        self,
+        container_id: str,
+        session_id: str,
+    ) -> Any: ...
+    async def resume_pending(
+        self,
+        container_id: str,
+        session_id: str,
+        timeout: int,
+    ) -> str: ...
+    async def write_terminal(
+        self,
+        container_id: str,
+        session_id: str,
+        data: str,
+        *,
+        append_newline: bool = True,
+    ) -> str: ...
+    async def capture_terminal(
+        self,
+        container_id: str,
+        session_id: str,
     ) -> str: ...
 
 
-class SessionManager(Protocol):
-    """Protocol for launching and managing agent sessions."""
-
-    async def launch(
-        self,
-        *,
-        caller_agent: str,
-        agent: str,
-        task: str,
-        context: str,
-    ) -> str:
-        """Launch an agent session, return session_id."""
-        ...
-
-    def poll(self, session_id: str) -> dict:
-        """Return {status, progress, elapsed}."""
-        ...
-
-    async def interrupt(self, session_id: str) -> str:
-        """Interrupt a session."""
-        ...
-
-    def result(self, session_id: str) -> str | None:
-        """Get final result text."""
-        ...
-
-
 class DelegateManager(Protocol):
-    async def delegate(
+    async def start_delegate(
         self,
         *,
-        caller_agent: str,
+        parent: object,
+        parent_run_id: str,
         agent: str,
         first_user_message: str,
         tools: list[str] | None,
         delegate_depth: int,
-        output_buffer: OutputBuffer | None,
+    ) -> object: ...
+
+    def inspect_run(
+        self,
+        *,
+        parent: object,
+        run_id: str,
+        limit: int = 200,
+        max_chars: int = 4000,
     ) -> str: ...
 
+    def cancel_run(
+        self,
+        *,
+        parent: object,
+        run_id: str,
+    ) -> str: ...
 
-CliGuard = Callable[[list[str]], None]
-"""Receive argv; raise ValueError to block execution."""
+    def defer_run(
+        self,
+        *,
+        parent: object,
+        run_id: str,
+        message: str,
+    ) -> str: ...
+
+    def input_run(
+        self,
+        *,
+        parent: object,
+        run_id: str,
+        data: str,
+        append_newline: bool = True,
+    ) -> object: ...
+
+    def wait_runs(
+        self,
+        *,
+        parent: object,
+        run_ids: list[str],
+    ) -> object: ...
 
 
 class DelegateDepthExceededError(RuntimeError):
@@ -98,16 +128,12 @@ class AgentContext:
     delegate_depth: int = 0
     manager: DelegateManager | None = None
     docker: DockerExecutor | None = None
-    state: AgentState | None = None
-    input_queue: asyncio.Queue[str] = field(factory=asyncio.Queue)
-    session_manager: SessionManager | None = None
     tavily_api_key: str = ""
-    cli_guard: CliGuard | None = None
-    flow_manager: FlowManager | None = None
-    root_flow: Flow | None = None
-    current_flow_id: str | None = None
-    current_output_buffer: OutputBuffer | None = None
-    output_buffer: OutputBuffer | None = None
-    skill_paths: list[str] = field(factory=list)
     subprocess_env: dict | None = None
     addon_context: object | None = None  # yuubot AddonContext, opaque to yuuagents
+    session: object | None = None
+    current_run_id: str = ""
+    current_flow: Any | None = None
+
+    def evolve(self, **changes: object) -> AgentContext:
+        return evolve(self, **changes)

@@ -36,10 +36,6 @@ class DockerConfig(msgspec.Struct, kw_only=True):
     image: str = "yuuagents-runtime:latest"
 
 
-class SkillsConfig(msgspec.Struct, kw_only=True):
-    paths: list[str] = msgspec.field(default_factory=lambda: ["~/.yagents/skills"])
-
-
 class TavilyConfig(msgspec.Struct, kw_only=True):
     api_key_env: str = "TAVILY_API_KEY"
 
@@ -90,7 +86,7 @@ class AgentEntry(msgspec.Struct, kw_only=True):
     """Per-agent configuration.
 
     Each agent references a named provider from ``providers:`` and may
-    override the model, persona, tools, and skills.
+    override the model, persona, and tools.
     """
 
     description: str
@@ -102,7 +98,6 @@ class AgentEntry(msgspec.Struct, kw_only=True):
     silence_timeout: float = 0  # 0 = disabled
     subagents: list[str] = msgspec.field(default_factory=list)
     tools: list[str] = msgspec.field(default_factory=list)
-    skills: list[str] = msgspec.field(default_factory=list)
 
 
 class Config(msgspec.Struct, kw_only=True):
@@ -110,7 +105,6 @@ class Config(msgspec.Struct, kw_only=True):
     db: DbConfig = msgspec.field(default_factory=DbConfig)
     yuutrace: YuuTraceConfig = msgspec.field(default_factory=YuuTraceConfig)
     docker: DockerConfig = msgspec.field(default_factory=DockerConfig)
-    skills: SkillsConfig = msgspec.field(default_factory=SkillsConfig)
     tavily: TavilyConfig = msgspec.field(default_factory=TavilyConfig)
     providers: dict[str, ProviderConfig] = msgspec.field(default_factory=dict)
     agents: dict[str, AgentEntry] = msgspec.field(default_factory=dict)

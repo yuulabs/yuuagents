@@ -1,1 +1,0 @@
-"""yuuagents tests package."""

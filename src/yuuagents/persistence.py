@@ -248,10 +248,7 @@ class TaskPersistence:
         if row is None:
             raise KeyError(task_id)
 
-        history: list[Any] = [
-            yuullm.system(row.system_prompt),
-            yuullm.user(row.task),
-        ]
+        history: list[Any] = [yuullm.user(row.task)]
 
         async with self._session()() as session:
             cps = (
@@ -367,7 +364,10 @@ class TaskPersistence:
         row = await self.get_task_row(task_id)
         if row is None:
             raise KeyError(task_id)
-        if row.status != AgentStatus.BLOCKED_ON_INPUT.value:
+        if row.status not in (
+            AgentStatus.RUNNING.value,
+            AgentStatus.BLOCKED_ON_INPUT.value,
+        ):
             return False
         if row.head_turn <= 0:
             return False
@@ -582,7 +582,7 @@ class TaskRecorder:
         history_append: Any | None,
         tool_calls: list[ToolCallDTO],
     ) -> None:
-        status_after = AgentStatus.BLOCKED_ON_INPUT if tool_calls else AgentStatus.DONE
+        status_after = AgentStatus.RUNNING if tool_calls else AgentStatus.DONE
         payload = LlmCheckpointPayload(
             history_append=history_append,
             tool_calls=tool_calls,

@@ -158,7 +158,7 @@ def install(
     \b
     This command will:
       1. Write merged config to ~/.yagents/config.yaml.
-      2. Create required directories (~/.yagents/skills, ~/.yagents/dockers, db parent).
+      2. Create required directories (~/.yagents/dockers, db parent).
       3. Initialize the database (create tables).
       4. Pull the Docker image specified in the config.
 
@@ -284,11 +284,8 @@ def install(
     click.echo(f"[2/{total_steps}] Creating directories ...")
 
     dirs_to_create = [
-        YAGENTS_HOME / "skills",
         YAGENTS_HOME / "dockers",
     ]
-    for sp in cfg.skills.paths:
-        dirs_to_create.append(Path(sp).expanduser())
 
     db_path = cfg.sqlite_path
     if db_path is not None:
@@ -475,7 +472,7 @@ def uninstall(ctx: click.Context, yes: bool) -> None:
       2. Unregister the systemd user service.
       3. Stop and remove all yagents Docker containers.
       4. Remove the SQLite database file.
-      5. Remove the entire ~/.yagents directory (config, skills, dockers, socket).
+      5. Remove the entire ~/.yagents directory (config, dockers, socket).
 
     After uninstall, the system is as if yagents was never installed.
     """
@@ -753,9 +750,6 @@ def config(
                 "docker": {
                     "image": cfg.docker.image,
                 },
-                "skills": {
-                    "paths": cfg.skills.paths,
-                },
                 "tavily": {
                     "api_key_env": cfg.tavily.api_key_env,
                 },
@@ -775,7 +769,6 @@ def config(
                         "model": a.model,
                         "persona": a.persona,
                         "tools": a.tools,
-                        "skills": a.skills,
                     }
                     for name, a in cfg.agents.items()
                 },
@@ -1051,9 +1044,6 @@ def stop(ctx: click.Context, task_id: str) -> None:
 )
 @click.option("--task", required=True, help="Task description")
 @click.option("--tools", default=None, help="Comma-separated tool names")
-@click.option(
-    "--skills", "skill_names", default=None, help="Comma-separated skill names"
-)
 @click.option("--model", default="", help="LLM model override")
 @click.option("--container", default="", help="Existing Docker container ID to use")
 @click.option("--image", default="", help="Docker image to create a new container from")
@@ -1064,7 +1054,6 @@ def run(
     persona: str,
     task: str,
     tools: str | None,
-    skill_names: str | None,
     model: str,
     container: str,
     image: str,
@@ -1081,8 +1070,6 @@ def run(
     }
     if tools:
         payload["tools"] = [t.strip() for t in tools.split(",")]
-    if skill_names:
-        payload["skills"] = [s.strip() for s in skill_names.split(",")]
     try:
         result = c.submit(payload)
         click.echo(f"Task started: {result['task_id']}  agent={result['agent_id']}")
@@ -1185,8 +1172,8 @@ def logs(ctx: click.Context, task_id: str) -> None:
 def input(ctx: click.Context, task_id: str, message: str) -> None:
     """Send input to a task.
 
-    If the agent is blocked on user_input, this replies to that request.
-    If the agent is done/cancelled, this appends a new user message and resumes it.
+    If the task is still running, this queues a new mailbox message.
+    If the task is done/cancelled/error, this appends a new user message and resumes it.
     """
     c = _client(ctx)
     try:
@@ -1223,47 +1210,3 @@ def trace_ui() -> None:
     cmd = [ytrace_bin, "ui", "--db", db_path, "--port", port]
     click.echo(f"Starting trace UI on http://127.0.0.1:{port} ...")
     raise SystemExit(subprocess.call(cmd))
-
-
-# ── Skills ──
-
-
-@cli.group()
-def skills() -> None:
-    """Manage Agent Skills."""
-
-
-@skills.command("list")
-@click.pass_context
-def skills_list(ctx: click.Context) -> None:
-    """List discovered skills."""
-    c = _client(ctx)
-    try:
-        sk = c.skills()
-        if not sk:
-            click.echo("No skills found.")
-            return
-        for s in sk:
-            click.echo(f"  {s['name']:20s}  {s.get('description', '')}")
-    except DaemonNotRunningError as e:
-        click.echo(str(e), err=True)
-        sys.exit(1)
-    finally:
-        c.close()
-
-
-@skills.command("scan")
-@click.pass_context
-def skills_scan(ctx: click.Context) -> None:
-    """Rescan skill directories."""
-    c = _client(ctx)
-    try:
-        sk = c.scan_skills()
-        click.echo(f"Found {len(sk)} skill(s).")
-        for s in sk:
-            click.echo(f"  {s['name']:20s}  {s.get('description', '')}")
-    except DaemonNotRunningError as e:
-        click.echo(str(e), err=True)
-        sys.exit(1)
-    finally:
-        c.close()
