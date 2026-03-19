@@ -40,7 +40,7 @@ async def delegate(
     task: str,
     tools: list[str] | None = None,
     manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
-    parent: object | None = yt.depends(lambda ctx: ctx.session),
+    parent: Session | None = yt.depends(lambda ctx: ctx.session),
     parent_run_id: str = yt.depends(lambda ctx: ctx.current_run_id),
     delegate_depth: int = yt.depends(lambda ctx: ctx.delegate_depth),
 ) -> str:
@@ -70,9 +70,9 @@ async def delegate(
         tools=tools,
         delegate_depth=next_depth,
     )
-    assert isinstance(child, Session)
     try:
-        await child.wait()
+        async for _step in child.step_iter():
+            pass
     except BaseException:
         pass
     return _last_assistant_text(child) or child.status.value

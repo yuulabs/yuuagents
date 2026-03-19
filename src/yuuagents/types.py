@@ -5,8 +5,18 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
+import attrs
 import msgspec
 import yuullm
+
+
+@attrs.define(frozen=True)
+class StepResult:
+    """Result yielded by Agent.steps() after each LLM round."""
+
+    done: bool          # True = LLM finished naturally (no tool calls)
+    tokens: int = 0     # cumulative total tokens so far
+    rounds: int = 0     # cumulative LLM rounds so far
 
 
 class AgentStatus(str, enum.Enum):

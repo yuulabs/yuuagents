@@ -34,6 +34,7 @@ class AgentConfig:
     max_steps: int = 0  # 0 = unlimited
     soft_timeout: float | None = None  # seconds; None = disabled
     silence_timeout: float | None = None  # seconds; None = disabled
+    tool_batch_timeout: float = 0  # seconds; 0 = no per-batch timeout
 
     def __init__(
         self,
@@ -47,6 +48,7 @@ class AgentConfig:
         max_steps: int = 0,
         soft_timeout: float | None = None,
         silence_timeout: float | None = None,
+        tool_batch_timeout: float = 0,
     ) -> None:
         resolved = _resolve_system(
             system=system,
@@ -60,6 +62,7 @@ class AgentConfig:
         object.__setattr__(self, "max_steps", max_steps)
         object.__setattr__(self, "soft_timeout", soft_timeout)
         object.__setattr__(self, "silence_timeout", silence_timeout)
+        object.__setattr__(self, "tool_batch_timeout", tool_batch_timeout)
 
     @property
     def system_prompt(self) -> str:

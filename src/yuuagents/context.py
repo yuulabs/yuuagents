@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from attrs import evolve
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from attrs import define, field
+from attrs import define, evolve
+
+if TYPE_CHECKING:
+    from yuuagents.core.flow import Flow
+    from yuuagents.runtime_session import Session
 
 
 class DockerExecutor(Protocol):
@@ -49,18 +52,18 @@ class DelegateManager(Protocol):
     async def start_delegate(
         self,
         *,
-        parent: object,
+        parent: Session,
         parent_run_id: str,
         agent: str,
         first_user_message: str,
         tools: list[str] | None,
         delegate_depth: int,
-    ) -> object: ...
+    ) -> Session: ...
 
     def inspect_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
         limit: int = 200,
         max_chars: int = 4000,
@@ -69,33 +72,33 @@ class DelegateManager(Protocol):
     def cancel_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
     ) -> str: ...
 
     def defer_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
         message: str,
     ) -> str: ...
 
-    def input_run(
+    async def input_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
         data: str,
         append_newline: bool = True,
-    ) -> object: ...
+    ) -> str: ...
 
-    def wait_runs(
+    async def wait_runs(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_ids: list[str],
-    ) -> object: ...
+    ) -> str: ...
 
 
 class DelegateDepthExceededError(RuntimeError):
@@ -131,9 +134,9 @@ class AgentContext:
     tavily_api_key: str = ""
     subprocess_env: dict | None = None
     addon_context: object | None = None  # yuubot AddonContext, opaque to yuuagents
-    session: object | None = None
+    session: Session | None = None
     current_run_id: str = ""
-    current_flow: Any | None = None
+    current_flow: Flow | None = None
 
     def evolve(self, **changes: object) -> AgentContext:
         return evolve(self, **changes)

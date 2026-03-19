@@ -16,7 +16,7 @@ from yuutools import (
 from yuuagents.agent import AgentConfig
 from yuuagents.context import AgentContext
 from yuuagents.runtime_session import Session
-from yuuagents.types import AgentInfo, AgentStatus, TaskRequest
+from yuuagents.types import AgentInfo, AgentStatus, StepResult, TaskRequest
 
 from yuuagents import tools  # noqa: F401 — yuuagents.tools.execute_bash etc.
 from yuuagents import init  # noqa: F401 — yuuagents.init.setup
@@ -37,6 +37,7 @@ __all__ = [
     "Session",
     "AgentStatus",
     "AgentInfo",
+    "StepResult",
     "TaskRequest",
     "tools",
     "init",

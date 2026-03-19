@@ -7,6 +7,7 @@ import asyncio
 import yuutools as yt
 
 from yuuagents.context import DelegateManager
+from yuuagents.runtime_session import Session
 
 
 @yt.tool(
@@ -40,7 +41,7 @@ async def inspect_background(
     limit: int = 200,
     max_chars: int = 4000,
     manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
-    parent: object | None = yt.depends(lambda ctx: ctx.session),
+    parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if manager is None or parent is None:
         return "[ERROR] background run manager unavailable"
@@ -61,7 +62,7 @@ async def inspect_background(
 async def cancel_background(
     run_id: str,
     manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
-    parent: object | None = yt.depends(lambda ctx: ctx.session),
+    parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if manager is None or parent is None:
         return "[ERROR] background run manager unavailable"
@@ -87,7 +88,7 @@ async def input_background(
     data: str,
     append_newline: bool = True,
     manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
-    parent: object | None = yt.depends(lambda ctx: ctx.session),
+    parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if manager is None or parent is None:
         return "[ERROR] background run manager unavailable"
@@ -116,7 +117,7 @@ async def defer_background(
     run_id: str,
     message: str = "",
     manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
-    parent: object | None = yt.depends(lambda ctx: ctx.session),
+    parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if manager is None or parent is None:
         return "[ERROR] background run manager unavailable"
@@ -135,7 +136,7 @@ async def defer_background(
 async def wait_background(
     run_ids: list[str],
     manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
-    parent: object | None = yt.depends(lambda ctx: ctx.session),
+    parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if manager is None or parent is None:
         return "[ERROR] background run manager unavailable"

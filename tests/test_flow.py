@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 
 import pytest
 import yuullm
 import yuutrace as ytrace
 import yuutools as yt
+from yuuagents.agent import AgentConfig
+from yuuagents.types import StepResult
 from yuuagents.core.flow import (
     Agent,
     Flow,
@@ -77,6 +80,41 @@ def make_client(
     return yuullm.YLLMClient(provider=provider, default_model="fake-model")
 
 
+def make_agent(
+    client: yuullm.YLLMClient,
+    manager: yt.ToolManager,
+    *,
+    ctx: object = None,
+    system: str = "",
+    agent_id: str = "test",
+    conversation_id: uuid.UUID | None = None,
+    tool_batch_timeout: float = 0,
+) -> Agent:
+    """Build an Agent with an AgentConfig."""
+    config = AgentConfig(
+        agent_id=agent_id,
+        tools=manager,
+        llm=client,
+        system=system,
+        tool_batch_timeout=tool_batch_timeout,
+    )
+    return Agent(config=config, ctx=ctx, conversation_id=conversation_id)
+
+
+async def run_agent(agent: Agent) -> None:
+    """Run all agent steps to completion."""
+    async with aclosing(agent.steps()) as gen:
+        async for _ in gen:
+            pass
+
+
+async def run_session(session) -> None:
+    """Run all session steps to completion."""
+    async with aclosing(session.step_iter()) as gen:
+        async for _ in gen:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Tests: Flow basics
 # ---------------------------------------------------------------------------
@@ -142,13 +180,10 @@ async def test_agent_text_response():
     client = make_client(script)
     manager: yt.ToolManager = yt.ToolManager()
 
-    agent: Agent[None] = Agent(
-        client=client, manager=manager, ctx=None,
-        system="You are a test agent.", model="fake-model",
-    )
+    agent = make_agent(client, manager, system="You are a test agent.")
     agent.start()
-    agent.send("Hi there")
-    await agent.wait()
+    agent.send_first("Hi there")
+    await run_agent(agent)
 
     # Check messages: system + user + assistant
     assert len(agent.messages) == 3
@@ -172,13 +207,10 @@ async def test_agent_merges_streamed_text_chunks_before_persisting_history():
     )
     manager: yt.ToolManager = yt.ToolManager()
 
-    agent: Agent[None] = Agent(
-        client=client, manager=manager, ctx=None,
-        model="fake-model",
-    )
+    agent = make_agent(client, manager)
     agent.start()
-    agent.send("hi")
-    await agent.wait()
+    agent.send_first("hi")
+    await run_agent(agent)
 
     assert agent.messages[-1] == ("assistant", ["现在 我需要回复用户。"])
 
@@ -223,7 +255,7 @@ async def test_session_exposes_last_and_total_usage_and_cost():
     )
 
     session.start("hello")
-    await session.wait()
+    await run_session(session)
 
     assert session.last_usage == usage
     assert session.total_usage == usage
@@ -254,20 +286,17 @@ async def test_llm_usage_and_cost_are_recorded_on_llm_gen_span():
         stores=[{"usage": usage, "cost": cost}],
     )
     manager: yt.ToolManager = yt.ToolManager()
-    agent: Agent[None] = Agent(
-        client=client,
-        manager=manager,
-        ctx=None,
+    agent = make_agent(
+        client, manager,
         system="You are a traced test agent.",
-        model="fake-model",
-        agent_name="trace-test",
+        agent_id="trace-test",
         conversation_id=uuid.uuid4(),
     )
 
     store = ytrace.init_memory()
     agent.start()
-    agent.send("hello")
-    await agent.wait()
+    agent.send_first("hello")
+    await run_agent(agent)
 
     conv = store.get_conversation(str(agent.conversation_id_value))
     assert conv is not None
@@ -316,7 +345,7 @@ async def test_session_resume_preserves_conversation_id():
     )
 
     session.start("hello")
-    await session.wait()
+    await run_session(session)
     first_conversation_id = session.conversation_id
 
     resumed = Session(config=session.config, context=session.context)
@@ -325,7 +354,7 @@ async def test_session_resume_preserves_conversation_id():
         history=session.history,
         conversation_id=first_conversation_id,
     )
-    await resumed.wait()
+    await run_session(resumed)
 
     assert isinstance(first_conversation_id, UUID)
     assert resumed.conversation_id == first_conversation_id
@@ -366,7 +395,7 @@ async def test_resume_trace_records_system_and_tools():
 
     first = Session(config=config, context=context)
     first.start("hello")
-    await first.wait()
+    await run_session(first)
 
     resumed = Session(config=config, context=context)
     resumed.resume(
@@ -374,7 +403,7 @@ async def test_resume_trace_records_system_and_tools():
         history=first.history,
         conversation_id=first.conversation_id,
     )
-    await resumed.wait()
+    await run_session(resumed)
 
     spans = store.get_all_spans()
     conv_spans = [
@@ -412,13 +441,10 @@ async def test_agent_tool_call():
     ]
     client = make_client(script)
 
-    agent: Agent[None] = Agent(
-        client=client, manager=manager, ctx=None,
-        model="fake-model",
-    )
+    agent = make_agent(client, manager)
     agent.start()
-    agent.send("What is 2 + 3?")
-    await agent.wait()
+    agent.send_first("What is 2 + 3?")
+    await run_agent(agent)
 
     # Should have: user + assistant(tool_call) + tool_result + assistant(text)
     assert len(agent.messages) == 4
@@ -460,15 +486,15 @@ async def test_agent_mailbox_drain():
     ]
     client = make_client(script)
 
-    agent: Agent[None] = Agent(
-        client=client, manager=manager, ctx=None, model="fake-model",
-    )
+    agent = make_agent(client, manager)
     agent.start()
-    agent.send("Go")
+    agent.send_first("Go")
 
+    # Run the agent in background so we can inject messages mid-run
+    wait_task = asyncio.create_task(run_agent(agent))
     await asyncio.sleep(0.02)  # let tool start
     agent.send("ping")  # inject while tool runs
-    await agent.wait()
+    await wait_task
 
     # The "ping" should appear in messages as a user message
     user_msgs = [m for m in agent.messages if m[0] == "user"]
@@ -490,18 +516,18 @@ async def test_background_tool_flow_waits_for_completion():
     client = make_client(
         [
             [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
+            # After defer, LLM sees "background it" + deferred result
             [yuullm.Response(item="finished")],
+            # After bg completes, _bg_finish sends a user message → triggers another LLM round
+            [yuullm.Response(item="bg complete")],
         ]
     )
-    agent: Agent[None] = Agent(
-        client=client,
-        manager=manager,
-        ctx=None,
-        model="fake-model",
-    )
+    agent = make_agent(client, manager)
     agent.start()
-    agent.send("Go")
+    agent.send_first("Go")
 
+    # Run agent in background so we can send defer signal mid-run
+    wait_task = asyncio.create_task(run_agent(agent))
     await asyncio.sleep(0.02)
     agent.send("background it", defer_tools=True)
     await asyncio.sleep(0.02)
@@ -513,7 +539,7 @@ async def test_background_tool_flow_waits_for_completion():
 
     released.set()
     await waiter
-    await agent.wait()
+    await wait_task
 
 
 # ---------------------------------------------------------------------------
@@ -539,16 +565,17 @@ async def test_agent_cancel():
     ]
     client = make_client(script)
 
-    agent: Agent[None] = Agent(
-        client=client, manager=manager, ctx=None, model="fake-model",
-    )
+    agent = make_agent(client, manager)
     agent.start()
-    agent.send("Start")
+    agent.send_first("Start")
 
+    # Run agent in background so we can cancel mid-run
+    wait_task = asyncio.create_task(run_agent(agent))
     await asyncio.sleep(0.05)
-    agent.flow.cancel()
+    # Cancel the driving task — this is how the host kills the agent
+    wait_task.cancel()
     try:
-        await agent.wait()
+        await wait_task
     except asyncio.CancelledError:
         pass
     # If we got here without hanging, cancel works.
@@ -598,13 +625,15 @@ def test_normalize_assistant_items_merges_text_and_groups_tool_calls():
             "type": "tool_calls",
             "tool_calls": [
                 {
+                    "type": "tool_call",
                     "id": "tc1",
-                    "function": "call_cap_cli",
+                    "name": "call_cap_cli",
                     "arguments": {"command": "im send --ctx 1 -- [...]"},
                 },
                 {
+                    "type": "tool_call",
                     "id": "tc2",
-                    "function": "read_cap_doc",
+                    "name": "read_cap_doc",
                     "arguments": {"name": "im"},
                 },
             ],
@@ -635,8 +664,9 @@ def test_trace_items_for_log_keeps_runtime_tool_call_shape_out_of_messages():
             "type": "tool_calls",
             "tool_calls": [
                 {
+                    "type": "tool_call",
                     "id": "tc1",
-                    "function": "call_cap_cli",
+                    "name": "call_cap_cli",
                     "arguments": {"command": "im send --ctx 1 -- [...]"},
                 }
             ],
@@ -655,3 +685,145 @@ def test_trace_items_for_log_merges_reasoning_chunks():
         {"type": "reasoning", "text": "现在 我 需要 回复"},
         {"type": "text", "text": "已发送"},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Tests: steps() async generator
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_steps_basic_flow():
+    """steps() yields one StepResult per LLM round, final done=True."""
+
+    @yt.tool()
+    async def noop() -> str:
+        """Do nothing."""
+        return "ok"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(noop)
+
+    # 2 rounds of tool calls, then natural end
+    script = [
+        [yuullm.ToolCall(id="tc1", name="noop", arguments="{}")],
+        [yuullm.ToolCall(id="tc2", name="noop", arguments="{}")],
+        [yuullm.Response(item="All done.")],
+    ]
+    client = make_client(script)
+
+    agent = make_agent(client, manager)
+    agent.start()
+    agent.send_first("Go")
+
+    results: list[StepResult] = []
+    async with aclosing(agent.steps()) as gen:
+        async for step in gen:
+            results.append(step)
+
+    assert len(results) == 3
+    assert not results[0].done
+    assert results[0].rounds == 1
+    assert not results[1].done
+    assert results[1].rounds == 2
+    assert results[2].done
+    assert results[2].rounds == 3
+
+
+@pytest.mark.asyncio
+async def test_steps_host_break_preserves_history():
+    """Breaking out of steps() early still gives valid messages."""
+
+    @yt.tool()
+    async def slow() -> str:
+        """A tool."""
+        return "result"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(slow)
+
+    # Script has 3 entries but we'll break after 1st step
+    script = [
+        [yuullm.ToolCall(id="tc1", name="slow", arguments="{}")],
+        [yuullm.ToolCall(id="tc2", name="slow", arguments="{}")],
+        [yuullm.Response(item="done")],
+    ]
+    client = make_client(script)
+
+    agent = make_agent(client, manager)
+    agent.start()
+    agent.send_first("Go")
+
+    async with aclosing(agent.steps()) as gen:
+        async for step in gen:
+            if not step.done:
+                break  # break after first tool round
+
+    # History should contain: user + assistant(tool_call) + tool_result
+    assert len(agent.messages) >= 3
+    assert agent.messages[0] == yuullm.user("Go")
+
+
+@pytest.mark.asyncio
+async def test_steps_session_host_break_syncs():
+    """Session.step_iter() syncs history even on early break."""
+    from yuuagents.agent import AgentConfig
+    from yuuagents.context import AgentContext
+    from yuuagents.runtime_session import Session
+
+    @yt.tool()
+    async def noop() -> str:
+        """Do nothing."""
+        return "ok"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(noop)
+
+    script = [
+        [yuullm.ToolCall(id="tc1", name="noop", arguments="{}")],
+        [yuullm.ToolCall(id="tc2", name="noop", arguments="{}")],
+        [yuullm.Response(item="done")],
+    ]
+    client = make_client(script)
+    session = Session(
+        config=AgentConfig(agent_id="test", tools=manager, llm=client),
+        context=AgentContext(task_id="t1", agent_id="test", workdir="", docker_container=""),
+    )
+    session.start("Go")
+
+    async with aclosing(session.step_iter()) as gen:
+        async for step in gen:
+            if not step.done:
+                break
+
+    # History is synced even though we broke early
+    assert len(session.history) >= 3
+
+
+@pytest.mark.asyncio
+async def test_tool_batch_timeout():
+    """tool_batch_timeout cancels slow tools with synthetic result."""
+
+    @yt.tool()
+    async def hang() -> str:
+        """Never returns."""
+        await asyncio.sleep(999)
+        return "unreachable"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(hang)
+
+    script = [
+        [yuullm.ToolCall(id="tc1", name="hang", arguments="{}")],
+        [yuullm.Response(item="Got timeout result.")],
+    ]
+    client = make_client(script)
+
+    agent = make_agent(client, manager, tool_batch_timeout=0.05)
+    agent.start()
+    agent.send_first("Go")
+    await run_agent(agent)
+
+    # Check that the tool result contains timeout message
+    tool_results = [e for e in agent.flow.stem if isinstance(e, ToolResult)]
+    assert len(tool_results) == 1
+    assert "[timeout]" in tool_results[0].output

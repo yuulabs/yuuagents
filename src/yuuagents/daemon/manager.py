@@ -125,8 +125,8 @@ class AgentManager:
         self._delegate_sessions_by_run_id[parent_run_id] = child
         child.status = AgentStatus.RUNNING
         child.start(first_user_message)
-        parent_agent = getattr(parent, "_agent", None)
-        child_agent = getattr(child, "_agent", None)
+        parent_agent = parent.agent
+        child_agent = child.agent
         if (
             parent_agent is not None
             and child_agent is not None
@@ -143,7 +143,8 @@ class AgentManager:
 
     async def _monitor_delegate(self, child: Session) -> None:
         try:
-            await child.wait()
+            async for _step in child.step_iter():
+                pass
             child.status = AgentStatus.DONE
         except asyncio.CancelledError:
             child.status = AgentStatus.CANCELLED
@@ -156,15 +157,12 @@ class AgentManager:
     def inspect_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
         limit: int = 200,
         max_chars: int = 4000,
     ) -> str:
-        session = parent if isinstance(parent, Session) else None
-        if session is None:
-            return f"[ERROR] invalid parent session for run {run_id}"
-        agent = getattr(session, "_agent", None)
+        agent = parent.agent
         if agent is None:
             return f"[ERROR] parent session not started for run {run_id}"
         flow = agent.flow.find(run_id)
@@ -181,7 +179,7 @@ class AgentManager:
         if delegate is not None:
             lines.append(f"delegate_task_id: {delegate.task_id}")
             lines.append(f"delegate_status: {delegate.status.value}")
-            delegate_agent = getattr(delegate, "_agent", None)
+            delegate_agent = delegate.agent
             if delegate_agent is not None:
                 lines.append("delegate_stem:")
                 lines.append(delegate_agent.render(limit=limit) or "<empty>")
@@ -193,13 +191,10 @@ class AgentManager:
     def cancel_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
     ) -> str:
-        session = parent if isinstance(parent, Session) else None
-        if session is None:
-            return f"[ERROR] invalid parent session for run {run_id}"
-        agent = getattr(session, "_agent", None)
+        agent = parent.agent
         if agent is None:
             return f"[ERROR] parent session not started for run {run_id}"
         flow = agent.flow.find(run_id)
@@ -214,11 +209,10 @@ class AgentManager:
     def defer_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
         message: str,
     ) -> str:
-        _ = parent
         delegate = self._delegate_sessions_by_run_id.get(run_id)
         if delegate is None:
             return f"[ERROR] run {run_id!r} is not a delegated agent"
@@ -232,19 +226,16 @@ class AgentManager:
     async def input_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
         data: str,
         append_newline: bool = True,
     ) -> str:
-        session = parent if isinstance(parent, Session) else None
-        if session is None:
-            return f"[ERROR] invalid parent session for run {run_id}"
         delegate = self._delegate_sessions_by_run_id.get(run_id)
         if delegate is not None:
             delegate.send(data, defer_tools=False)
             return f"Input sent to delegated run {run_id}"
-        agent = getattr(session, "_agent", None)
+        agent = parent.agent
         if agent is None:
             return f"[ERROR] parent session not started for run {run_id}"
         flow = agent.flow.find(run_id)
@@ -253,8 +244,8 @@ class AgentManager:
         tool_name = flow.info.get("tool_name")
         if tool_name != "execute_bash":
             return f"[ERROR] run {run_id!r} does not accept input"
-        docker = session.context.docker
-        container = session.context.docker_container
+        docker = parent.context.docker
+        container = parent.context.docker_container
         if docker is None or not container:
             return f"[ERROR] docker terminal unavailable for run {run_id!r}"
         return await docker.write_terminal(
@@ -267,26 +258,23 @@ class AgentManager:
     async def wait_runs(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_ids: list[str],
     ) -> str:
-        session = parent if isinstance(parent, Session) else None
-        if session is None:
-            return "[ERROR] invalid parent session for wait"
-        agent = getattr(session, "_agent", None)
+        agent = parent.agent
         if agent is None:
             return "[ERROR] parent session not started for wait"
         if not run_ids:
             return "[ERROR] run_ids must not be empty"
 
-        waits: list[asyncio.Future | asyncio.Task | Any] = []
+        waits: list[asyncio.Future | asyncio.Task[Any] | Any] = []
         for run_id in run_ids:
             delegate = self._delegate_sessions_by_run_id.get(run_id)
             if delegate is not None:
-                child_agent = getattr(delegate, "_agent", None)
-                if child_agent is None:
+                task = self._tasks.get(delegate.task_id)
+                if task is None:
                     return f"[ERROR] delegated run {run_id!r} not started"
-                waits.append(child_agent.wait())
+                waits.append(task)
                 continue
             flow = agent.flow.find(run_id)
             if flow is None:
@@ -302,7 +290,8 @@ class AgentManager:
         session.status = AgentStatus.RUNNING
         session.start(task)
         try:
-            await session.wait()
+            async for _step in session.step_iter():
+                pass
             session.status = AgentStatus.DONE
             await self._write_terminal(session.task_id, AgentStatus.DONE, None)
         except asyncio.CancelledError:
@@ -629,20 +618,28 @@ class AgentManager:
             history=await self._persistence.load_history(task_id),
             status=AgentStatus(row.status),
             error=err,
-            steps=row.head_turn,
+            stored_steps=row.head_turn,
             created_at=row.created_at,
             mailbox_id=row.task_id,
         )
         self._sessions[task_id] = session
         self._contexts[task_id] = ctx
 
-    async def _build_root_session(
+    async def _build_session(
         self,
         *,
         task_id: str,
         req: TaskRequest,
         delegate_depth: int,
+        docker_container: str = "",
+        workdir: str = "",
+        tavily_api_key: str = "",
     ) -> Session:
+        """Build a Session for both root and child (delegate) use cases.
+
+        For root sessions, pass docker_container/workdir/tavily_api_key as empty
+        to use defaults. For child sessions, pass the parent's values.
+        """
         agent_id = req.agent
         agent_entry = self.config.agents.get(agent_id)
         llm_client = self._make_llm(agent_name=agent_id, model_override=req.model)
@@ -654,14 +651,11 @@ class AgentManager:
             or (agent_entry.persona if agent_entry and agent_entry.persona else "")
             or agent_id
         )
-        prompt_vars = get_prompt_vars()
-        for key, value in prompt_vars.items():
-            persona_text = persona_text.replace(f"{{{key}}}", value)
-        container_id = await self.docker.resolve(
-            task_id=task_id,
-            container=req.container,
-            image=req.image,
-        )
+        # Root sessions apply prompt variable substitution
+        if not docker_container:
+            prompt_vars = get_prompt_vars()
+            for key, value in prompt_vars.items():
+                persona_text = persona_text.replace(f"{{{key}}}", value)
         agents_prompt = self._default_agents_prompt(agent_id=agent_id)
         system_prompt = _build_system_prompt(
             persona_text, agents_prompt, DOCKER_SYSTEM_PROMPT
@@ -674,27 +668,46 @@ class AgentManager:
             soft_timeout=(agent_entry.soft_timeout or None) if agent_entry else None,
             silence_timeout=(agent_entry.silence_timeout or None) if agent_entry else None,
         )
+        # Resolve docker container for root, or reuse parent's for child
+        if not docker_container:
+            docker_container = await self.docker.resolve(
+                task_id=task_id,
+                container=req.container,
+                image=req.image,
+            )
         ctx = AgentContext(
             task_id=task_id,
             agent_id=agent_id,
-            workdir=self.docker.workdir,
-            docker_container=container_id,
+            workdir=workdir or self.docker.workdir,
+            docker_container=docker_container,
             delegate_depth=delegate_depth,
             manager=self,
             docker=self.docker,
-            tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
+            tavily_api_key=tavily_api_key or os.environ.get(self.config.tavily.api_key_env, ""),
         )
         session = Session(config=config, context=ctx, mailbox_id=task_id)
+        return session
+
+    async def _build_root_session(
+        self,
+        *,
+        task_id: str,
+        req: TaskRequest,
+        delegate_depth: int,
+    ) -> Session:
+        session = await self._build_session(
+            task_id=task_id, req=req, delegate_depth=delegate_depth,
+        )
         if self._persistence is not None:
             await self._persistence.create_task(
                 task_id=task_id,
-                agent_id=agent_id,
-                persona=persona_text,
+                agent_id=req.agent,
+                persona=session.config.system[:200],
                 task=req.task,
-                system_prompt=system_prompt,
-                model=llm_client.default_model,
-                tools=tool_names,
-                docker_container=container_id,
+                system_prompt=session.config.system,
+                model=session.config.llm.default_model,
+                tools=req.tools or self._default_tools(req.agent),
+                docker_container=session.context.docker_container,
                 created_at=session.created_at,
             )
         return session
@@ -707,36 +720,11 @@ class AgentManager:
         req: TaskRequest,
         delegate_depth: int,
     ) -> Session:
-        agent_id = req.agent
-        agent_entry = self.config.agents.get(agent_id)
-        llm_client = self._make_llm(agent_name=agent_id, model_override=req.model)
-        tool_names = req.tools or self._default_tools(agent_id)
-        tool_objs = [BUILTIN_TOOLS[name] for name in tool_names if name in BUILTIN_TOOLS]
-        tools = yt.ToolManager(tool_objs)
-        persona_text = (
-            req.persona
-            or (agent_entry.persona if agent_entry and agent_entry.persona else "")
-            or agent_id
-        )
-        agents_prompt = self._default_agents_prompt(agent_id=agent_id)
-        system_prompt = _build_system_prompt(persona_text, agents_prompt, DOCKER_SYSTEM_PROMPT)
-        config = AgentConfig(
-            agent_id=agent_id,
-            tools=tools,
-            llm=llm_client,
-            system=system_prompt,
-            soft_timeout=(agent_entry.soft_timeout or None) if agent_entry else None,
-            silence_timeout=(agent_entry.silence_timeout or None) if agent_entry else None,
-        )
-        # Reuse parent's docker container
-        ctx = AgentContext(
+        return await self._build_session(
             task_id=task_id,
-            agent_id=agent_id,
-            workdir=parent.context.workdir,
-            docker_container=parent.context.docker_container,
+            req=req,
             delegate_depth=delegate_depth,
-            manager=self,
-            docker=self.docker,
+            docker_container=parent.context.docker_container,
+            workdir=parent.context.workdir,
             tavily_api_key=parent.context.tavily_api_key,
         )
-        return Session(config=config, context=ctx, mailbox_id=task_id)

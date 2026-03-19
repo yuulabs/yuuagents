@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from typing import Any, Generic, TypeVar
 from uuid import UUID, uuid4
 
 import msgspec
 import yuullm
 import yuutrace as ytrace
-import yuutools
 from attrs import define, field
+
+from yuuagents.agent import AgentConfig
+from yuuagents.types import StepResult
 
 S = TypeVar("S")
 M = TypeVar("M")
@@ -199,12 +201,8 @@ class Flow(Generic[S, M]):
 class Agent(Generic[Ctx]):
     """An LLM agent: observable, interruptible, addressable."""
 
-    client: yuullm.YLLMClient
-    manager: yuutools.ToolManager[Ctx]
+    config: AgentConfig
     ctx: Ctx
-    system: str = ""
-    model: str | None = None
-    agent_name: str = "agent"
     conversation_id: UUID | None = None
     initial_messages: list[yuullm.Message] = field(factory=list)
 
@@ -215,12 +213,18 @@ class Agent(Generic[Ctx]):
     total_usage: yuullm.Usage | None = field(default=None, init=False)
     last_cost_usd: float = field(default=0.0, init=False)
     total_cost_usd: float = field(default=0.0, init=False)
+    rounds: int = field(default=0, init=False)
     _defer: asyncio.Event = field(factory=asyncio.Event, init=False)
     _chat: ytrace.ConversationContext | None = field(default=None, init=False)
+    _bg_tasks: set[asyncio.Task[Any]] = field(factory=set, init=False)
 
     def start(self) -> None:
+        """Create the flow. Does NOT launch a background task."""
         self.flow = Flow(kind="agent")
-        self.flow.start(self._run())
+
+    def send_first(self, task: str) -> None:
+        """Queue the first user message. Must be called before steps()."""
+        self.flow.send(yuullm.user(task))
 
     def send(self, msg: yuullm.Message | str, *, defer_tools: bool = False) -> None:
         if isinstance(msg, str):
@@ -235,9 +239,6 @@ class Agent(Generic[Ctx]):
     def render(self, limit: int = 200) -> str:
         return self.flow.render(render_agent_event, limit)
 
-    async def wait(self) -> None:
-        await self.flow.wait()
-
     # -- LLM loop --
 
     def _conv_id(self) -> UUID:
@@ -247,11 +248,13 @@ class Agent(Generic[Ctx]):
     def conversation_id_value(self) -> UUID:
         return self._conv_id()
 
-    async def _run(self) -> None:
+    async def steps(self) -> AsyncGenerator[StepResult, None]:
+        """Host-driven async generator. Yields after each LLM round."""
+        # Setup messages
         if self.initial_messages:
             self.messages.extend(self.initial_messages)
-        elif self.system:
-            self.messages.append(yuullm.system(self.system))
+        elif self.config.system:
+            self.messages.append(yuullm.system(self.config.system))
 
         first: yuullm.Message = await self.flow.mailbox.get()
         self.flow.emit(UserMessage(_msg_text(first)))
@@ -260,27 +263,42 @@ class Agent(Generic[Ctx]):
         if ytrace.is_initialized():
             with ytrace.conversation(
                 id=self._conv_id(),
-                agent=self.agent_name,
-                model=self.model or "",
+                agent=self.config.agent_id,
+                model=self.config.llm.default_model or "",
             ) as chat:
                 self._chat = chat
-                if self.system:
-                    chat.system(self.system, tools=self.manager.specs() or None)
+                if self.config.system:
+                    chat.system(self.config.system, tools=self.config.tools.specs() or None)
                 chat.user(_msg_text(first))
                 try:
-                    await self._loop()
+                    async for step in self._step_loop():
+                        yield step
                 finally:
                     self._chat = None
         else:
-            await self._loop()
+            async for step in self._step_loop():
+                yield step
 
-    async def _loop(self) -> None:
+    async def _step_loop(self) -> AsyncGenerator[StepResult, None]:
         while True:
+            self.rounds += 1
             tool_calls = await self._call_llm()
             if not tool_calls:
+                await self._wait_pending_bg()
+                if self._drain_mailbox():
+                    continue
+                yield StepResult(done=True, tokens=self.total_tokens, rounds=self.rounds)
                 return
             await self._run_tools(tool_calls)
             self._drain_mailbox()
+            yield StepResult(done=False, tokens=self.total_tokens, rounds=self.rounds)
+
+    async def _wait_pending_bg(self) -> None:
+        """Wait for all background tasks to complete."""
+        if not self._bg_tasks:
+            return
+        done, _ = await asyncio.wait(self._bg_tasks)
+        self._bg_tasks -= done
 
     async def _call_llm(self) -> list[yuullm.ToolCall]:
         return await self._stream_llm(self._chat)
@@ -297,8 +315,8 @@ class Agent(Generic[Ctx]):
         self,
         gen: ytrace.LlmGenContext | None,
     ) -> list[yuullm.ToolCall]:
-        stream, store = await self.client.stream(
-            self.messages, model=self.model, tools=self.manager.specs() or None,
+        stream, store = await self.config.llm.stream(
+            self.messages, model=self.config.llm.default_model, tools=self.config.tools.specs() or None,
         )
         assistant_items: list[yuullm.Item] = []
         reasoning_items: list[str] = []
@@ -363,7 +381,7 @@ class Agent(Generic[Ctx]):
         evolve = getattr(ctx, "evolve", None)
         if callable(evolve):
             ctx = evolve(current_run_id=child.id, current_flow=child)
-        bound = self.manager[tc.name].bind(ctx)
+        bound = self.config.tools[tc.name].bind(ctx)
         try:
             result = await bound.run(**kwargs)
         except Exception as exc:
@@ -403,6 +421,11 @@ class Agent(Generic[Ctx]):
         pending = {t for _, _, t, _ in tasks.values()}
         defer_task = asyncio.create_task(self._defer.wait())
 
+        # Optional batch-level timeout
+        timeout_task: asyncio.Task[None] | None = None
+        if self.config.tool_batch_timeout > 0:
+            timeout_task = asyncio.create_task(asyncio.sleep(self.config.tool_batch_timeout))
+
         # Track per-tool self-defer requests.
         child_defer_tasks: dict[asyncio.Task[None], str] = {}
         for call_id, (tc, child, task, span) in tasks.items():
@@ -410,9 +433,12 @@ class Agent(Generic[Ctx]):
             child_defer_tasks[cdt] = call_id
 
         self_deferred: set[str] = set()  # call_ids that self-deferred
+        timed_out = False
 
         while pending:
             signals = {defer_task} | set(child_defer_tasks)
+            if timeout_task is not None:
+                signals.add(timeout_task)
             done, pending = await asyncio.wait(
                 pending | signals, return_when=asyncio.FIRST_COMPLETED,
             )
@@ -428,18 +454,45 @@ class Agent(Generic[Ctx]):
             if defer_task in done:
                 break
 
+            if timeout_task is not None and timeout_task in done:
+                timed_out = True
+                # Cancel all still-pending tool tasks
+                for t in pending:
+                    t.cancel()
+                break
+
         if not defer_task.done():
             defer_task.cancel()
         self._defer.clear()
+        if timeout_task is not None and not timeout_task.done():
+            timeout_task.cancel()
         for cdt in child_defer_tasks:
             cdt.cancel()
 
         # collect results
         for call_id, (tc, child, task, span) in tasks.items():
             if task.done() and call_id not in self_deferred:
-                output = task.result()
-                self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=output))
-                self.messages.append(yuullm.tool(call_id, output))
+                if task.cancelled():
+                    # Tool was cancelled by batch timeout
+                    content = "[timeout] tool execution cancelled"
+                    self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=content))
+                    self.messages.append(yuullm.tool(call_id, content))
+                    if span is not None:
+                        span.fail(content)
+                        span.end()
+                else:
+                    output = task.result()
+                    self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=output))
+                    self.messages.append(yuullm.tool(call_id, output))
+            elif timed_out and call_id not in self_deferred:
+                # Still pending when batch timed out — cancel and report
+                task.cancel()
+                content = "[timeout] tool execution cancelled"
+                self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=content))
+                self.messages.append(yuullm.tool(call_id, content))
+                if span is not None:
+                    span.fail(content)
+                    span.end()
             else:
                 run_id = child.id
                 # Include partial output from self-defer if available.
@@ -453,7 +506,9 @@ class Agent(Generic[Ctx]):
                     yuullm.tool(call_id, content)
                 )
                 # Pass span to bg_finish so it can end the span when done
-                asyncio.create_task(self._bg_finish(run_id, task, span))
+                bg = asyncio.create_task(self._bg_finish(run_id, task, span))
+                self._bg_tasks.add(bg)
+                bg.add_done_callback(self._bg_tasks.discard)
 
         # End tools batch span (background tool spans outlive it — fine per OTEL)
         if tools_ctx is not None:
@@ -485,7 +540,9 @@ class Agent(Generic[Ctx]):
             self._chat.user(text)
         self.flow.send(yuullm.user(text))
 
-    def _drain_mailbox(self) -> None:
+    def _drain_mailbox(self) -> bool:
+        """Drain pending messages from the mailbox. Returns True if any were drained."""
+        drained = False
         while not self.flow.mailbox.empty():
             msg: yuullm.Message = self.flow.mailbox.get_nowait()
             text = _msg_text(msg)
@@ -493,6 +550,8 @@ class Agent(Generic[Ctx]):
             self.messages.append(msg)
             if self._chat is not None:
                 self._chat.user(text)
+            drained = True
+        return drained
 
 
 # ---------------------------------------------------------------------------
@@ -536,15 +595,7 @@ def _normalize_assistant_items(items: list[Any], *, group_tool_calls: bool = Tru
                     "tool_calls": list(pending_tool_calls),
                 })
             else:
-                normalized.extend(
-                    {
-                        "type": "tool_call",
-                        "id": item["id"],
-                        "name": item["function"],
-                        "arguments": item["arguments"],
-                    }
-                    for item in pending_tool_calls
-                )
+                normalized.extend(pending_tool_calls)
             pending_tool_calls.clear()
 
     for item in items:
@@ -562,8 +613,9 @@ def _normalize_assistant_items(items: list[Any], *, group_tool_calls: bool = Tru
             _flush_text()
             _flush_reasoning()
             pending_tool_calls.append({
+                "type": "tool_call",
                 "id": item.get("id", ""),
-                "function": item.get("name", ""),
+                "name": item.get("name", ""),
                 "arguments": item.get("arguments", {}),
             })
             continue

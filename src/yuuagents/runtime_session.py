@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+import attrs
 import yuullm
 from attrs import define, field
 
 from yuuagents.agent import AgentConfig
 from yuuagents.context import AgentContext
 from yuuagents.core.flow import Agent as FlowAgent
-from yuuagents.types import AgentStatus, ErrorInfo
+from yuuagents.types import AgentStatus, ErrorInfo, StepResult
+
+if TYPE_CHECKING:
+    from yuuagents.core.flow import Flow
 
 
 @define
@@ -24,22 +30,55 @@ class Session:
     history: list[yuullm.Message] = field(factory=list)
     status: AgentStatus = AgentStatus.IDLE
     error: ErrorInfo | None = None
-    steps: int = 0
-    total_tokens: int = 0
-    last_usage: yuullm.Usage | None = None
-    total_usage: yuullm.Usage | None = None
-    last_cost_usd: float = 0.0
-    total_cost_usd: float = 0.0
-    last_input_tokens: int = 0
+    stop_reason: str = ""
     created_at: datetime = field(factory=lambda: datetime.now(timezone.utc))
     mailbox_id: str = field(factory=lambda: uuid4().hex)
-    _agent: FlowAgent[AgentContext] | None = field(default=None, init=False)
+    _stored_steps: int = 0  # for persisted sessions loaded without a live agent
+    agent: FlowAgent[AgentContext] | None = field(default=None, init=False)
+
+    # -- property delegates (read from agent when alive, zero otherwise) --
+
+    @property
+    def flow(self) -> Flow | None:
+        return self.agent.flow if self.agent is not None else None
+
+    @property
+    def steps(self) -> int:
+        if self.agent is not None:
+            return self.agent.rounds
+        return self._stored_steps
+
+    @property
+    def total_tokens(self) -> int:
+        return self.agent.total_tokens if self.agent is not None else 0
+
+    @property
+    def last_usage(self) -> yuullm.Usage | None:
+        return self.agent.last_usage if self.agent is not None else None
+
+    @property
+    def total_usage(self) -> yuullm.Usage | None:
+        return self.agent.total_usage if self.agent is not None else None
+
+    @property
+    def last_cost_usd(self) -> float:
+        return self.agent.last_cost_usd if self.agent is not None else 0.0
+
+    @property
+    def total_cost_usd(self) -> float:
+        return self.agent.total_cost_usd if self.agent is not None else 0.0
+
+    @property
+    def last_input_tokens(self) -> int:
+        if self.agent is not None and self.agent.last_usage is not None:
+            return self.agent.last_usage.input_tokens
+        return 0
 
     @property
     def conversation_id(self) -> UUID | None:
-        if self._agent is None:
+        if self.agent is None:
             return None
-        return self._agent.conversation_id_value
+        return self.agent.conversation_id_value
 
     @property
     def agent_id(self) -> str:
@@ -49,32 +88,40 @@ class Session:
     def task_id(self) -> str:
         return self.context.task_id
 
+    def _make_agent(
+        self,
+        *,
+        system: str | None = None,
+        conversation_id: UUID | None = None,
+        initial_messages: list[yuullm.Message] | None = None,
+    ) -> FlowAgent[AgentContext]:
+        cfg = self.config if system is None else attrs.evolve(self.config, system=system)
+        return FlowAgent(
+            config=cfg,
+            ctx=self.context,
+            conversation_id=conversation_id,
+            initial_messages=initial_messages or [],
+        )
+
     def start(self, task: str) -> None:
-        """Create and start the underlying FlowAgent, then send the task."""
+        """Create the underlying FlowAgent and queue the task. Does not launch a background task."""
         self.task = task
         self.context = self.context.evolve(session=self)
-        agent = FlowAgent(
-            client=self.config.llm,
-            manager=self.config.tools,
-            ctx=self.context,
-            system=self.config.system,
-            model=self.config.llm.default_model,
-            agent_name=self.config.agent_id,
-        )
+        agent = self._make_agent()
         agent.start()
-        agent.send(task)
-        self._agent = agent
+        agent.send_first(task)
+        self.agent = agent
 
     def send(self, content: str, *, defer_tools: bool = False) -> None:
         """Forward a message to the running agent."""
-        if self._agent is None:
+        if self.agent is None:
             raise RuntimeError("session not started")
-        self._agent.send(content, defer_tools=defer_tools)
+        self.agent.send(content, defer_tools=defer_tools)
 
     def cancel(self) -> None:
         """Cancel the running agent flow."""
-        if self._agent is not None:
-            self._agent.flow.cancel()
+        if self.agent is not None:
+            self.agent.flow.cancel()
 
     def resume(
         self,
@@ -84,32 +131,25 @@ class Session:
         conversation_id: UUID | None = None,
         system: str | None = None,
     ) -> None:
-        """Resume from prior history: pre-fill messages, then send a new task."""
+        """Resume from prior history: pre-fill messages, then queue a new task."""
         self.task = task
         self.context = self.context.evolve(session=self)
-        agent = FlowAgent(
-            client=self.config.llm,
-            manager=self.config.tools,
-            ctx=self.context,
-            system=self.config.system if system is None else system,
-            model=self.config.llm.default_model,
-            agent_name=self.config.agent_id,
+        agent = self._make_agent(
+            system=system,
             conversation_id=conversation_id,
             initial_messages=list(history),
         )
         agent.start()
-        agent.send(task)
-        self._agent = agent
+        agent.send_first(task)
+        self.agent = agent
 
-    async def wait(self) -> None:
-        """Await agent completion and sync history + token counts."""
-        if self._agent is None:
+    async def step_iter(self) -> AsyncGenerator[StepResult, None]:
+        """Host-driven step iteration. Syncs history on exit."""
+        if self.agent is None:
             raise RuntimeError("session not started")
-        await self._agent.wait()
-        self.history = self._agent.messages
-        self.total_tokens = self._agent.total_tokens
-        self.last_usage = self._agent.last_usage
-        self.total_usage = self._agent.total_usage
-        self.last_cost_usd = self._agent.last_cost_usd
-        self.total_cost_usd = self._agent.total_cost_usd
-        self.last_input_tokens = 0 if self.last_usage is None else self.last_usage.input_tokens
+        try:
+            async for step in self.agent.steps():
+                yield step
+        finally:
+            if self.agent is not None:
+                self.history = list(self.agent.messages)
