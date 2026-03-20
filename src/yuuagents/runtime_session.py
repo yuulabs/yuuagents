@@ -13,7 +13,7 @@ from attrs import define, field
 
 from yuuagents.agent import AgentConfig
 from yuuagents.context import AgentContext
-from yuuagents.core.flow import Agent as FlowAgent
+from yuuagents.core.flow import AgentState, Agent as FlowAgent
 from yuuagents.types import AgentStatus, ErrorInfo, StepResult
 
 if TYPE_CHECKING:
@@ -33,7 +33,7 @@ class Session:
     stop_reason: str = ""
     created_at: datetime = field(factory=lambda: datetime.now(timezone.utc))
     mailbox_id: str = field(factory=lambda: uuid4().hex)
-    _stored_steps: int = 0  # for persisted sessions loaded without a live agent
+    stored_steps: int = 0  # for persisted sessions loaded without a live agent
     agent: FlowAgent[AgentContext] | None = field(default=None, init=False)
 
     # -- property delegates (read from agent when alive, zero otherwise) --
@@ -46,7 +46,7 @@ class Session:
     def steps(self) -> int:
         if self.agent is not None:
             return self.agent.rounds
-        return self._stored_steps
+        return self.stored_steps
 
     @property
     def total_tokens(self) -> int:
@@ -142,6 +142,23 @@ class Session:
         agent.start()
         agent.send_first(task)
         self.agent = agent
+
+    @property
+    def has_pending_background(self) -> bool:
+        if self.agent is not None:
+            return self.agent.has_pending_background
+        return False
+
+    async def snapshot(self, *, as_interrupted: bool = False) -> AgentState:
+        """Delegate to the underlying agent's snapshot."""
+        if self.agent is None:
+            raise RuntimeError("session not started")
+        return await self.agent.snapshot(as_interrupted=as_interrupted)
+
+    async def kill(self) -> None:
+        """Delegate to the underlying agent's kill."""
+        if self.agent is not None:
+            await self.agent.kill()
 
     async def step_iter(self) -> AsyncGenerator[StepResult, None]:
         """Host-driven step iteration. Syncs history on exit."""

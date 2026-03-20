@@ -31,6 +31,41 @@ M = TypeVar("M")
 Ctx = TypeVar("Ctx")
 
 
+# ---------------------------------------------------------------------------
+# Agent state snapshot — minimal restorable state
+# ---------------------------------------------------------------------------
+
+
+class AgentState(msgspec.Struct, frozen=True):
+    """Minimal restorable state for an Agent.
+
+    Every tool_call in messages is paired with a tool result — no dangling
+    calls.  A new Agent can be constructed from this state with zero issues.
+    """
+
+    messages: tuple[yuullm.Message, ...]
+    total_usage: yuullm.Usage | None
+    total_cost_usd: float
+    rounds: int
+    conversation_id: str | None  # UUID hex or None
+
+
+# ---------------------------------------------------------------------------
+# Background task metadata
+# ---------------------------------------------------------------------------
+
+
+@define(frozen=True)
+class _BgTaskInfo:
+    """Structured metadata for a background (deferred) tool task."""
+
+    call_id: str
+    tool_name: str
+    child: "Flow[Any, Any]"
+    task: "asyncio.Task[None]"    # the _bg_finish wrapper task
+    tool_task: "asyncio.Task[str]"  # the actual tool execution task
+
+
 def _usage_total_tokens(usage: yuullm.Usage) -> int:
     total = usage.total_tokens
     if total is not None:
@@ -216,7 +251,7 @@ class Agent(Generic[Ctx]):
     rounds: int = field(default=0, init=False)
     _defer: asyncio.Event = field(factory=asyncio.Event, init=False)
     _chat: ytrace.ConversationContext | None = field(default=None, init=False)
-    _bg_tasks: set[asyncio.Task[Any]] = field(factory=set, init=False)
+    _bg_tasks: dict[str, _BgTaskInfo] = field(factory=dict, init=False)
 
     def start(self) -> None:
         """Create the flow. Does NOT launch a background task."""
@@ -238,6 +273,88 @@ class Agent(Generic[Ctx]):
 
     def render(self, limit: int = 200) -> str:
         return self.flow.render(render_agent_event, limit)
+
+    # -- state model --
+
+    @property
+    def has_pending_background(self) -> bool:
+        """True if any background (deferred) tasks are still running."""
+        return bool(self._bg_tasks)
+
+    async def snapshot(self, *, as_interrupted: bool = False) -> AgentState:
+        """Return a restorable state snapshot.
+
+        ``as_interrupted=False`` (default): if background tasks are pending,
+        **await** them first so that all tool results are present.
+
+        ``as_interrupted=True``: return immediately; for each pending bg task
+        synthesise an ``[interrupted]`` tool result in the returned copy of
+        messages.  Does NOT mutate ``self.messages``.
+        """
+        if not as_interrupted:
+            if self._bg_tasks:
+                await asyncio.wait(
+                    [info.task for info in self._bg_tasks.values()],
+                )
+                self._drain_mailbox()
+            return AgentState(
+                messages=tuple(self.messages),
+                total_usage=self.total_usage,
+                total_cost_usd=self.total_cost_usd,
+                rounds=self.rounds,
+                conversation_id=self._conv_id().hex if self.conversation_id or self.flow else None,
+            )
+
+        # as_interrupted: synthetic copy with interrupted results
+        msgs = list(self.messages)
+        for info in self._bg_tasks.values():
+            tail_output = info.child.render(render_agent_event, limit=50)
+            content = f"[interrupted] {tail_output}" if tail_output else "[interrupted]"
+            msgs.append(yuullm.tool(info.call_id, content))
+        return AgentState(
+            messages=tuple(msgs),
+            total_usage=self.total_usage,
+            total_cost_usd=self.total_cost_usd,
+            rounds=self.rounds,
+            conversation_id=self._conv_id().hex if self.conversation_id or self.flow else None,
+        )
+
+    async def kill(self) -> None:
+        """Cancel all background tasks and synthesise interrupted results.
+
+        After kill(), ``self.messages`` is valid — ``snapshot()`` will return
+        immediately.
+        """
+        if not self._bg_tasks:
+            return
+
+        # Snapshot before cancellation (gather may trigger _bg_finish which pops entries)
+        infos = list(self._bg_tasks.values())
+
+        # Cancel all tasks
+        for info in infos:
+            if not info.tool_task.done():
+                info.tool_task.cancel()
+            if not info.task.done():
+                info.task.cancel()
+
+        # Cancel child flows recursively
+        for info in infos:
+            info.child.cancel()
+
+        # Wait for cancellation to propagate
+        all_tasks = [info.task for info in infos]
+        if all_tasks:
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+
+        # Synthesise interrupted tool results into self.messages
+        for info in infos:
+            tail_output = info.child.render(render_agent_event, limit=50)
+            content = f"[interrupted] {tail_output}" if tail_output else "[interrupted]"
+            self.flow.emit(ToolResult(call_id=info.call_id, name=info.tool_name, output=content))
+            self.messages.append(yuullm.tool(info.call_id, content))
+
+        self._bg_tasks.clear()
 
     # -- LLM loop --
 
@@ -261,26 +378,41 @@ class Agent(Generic[Ctx]):
         self.messages.append(first)
 
         if ytrace.is_initialized():
-            with ytrace.conversation(
+            chat = ytrace.start_conversation(
                 id=self._conv_id(),
                 agent=self.config.agent_id,
                 model=self.config.llm.default_model or "",
-            ) as chat:
-                self._chat = chat
-                if self.config.system:
-                    chat.system(self.config.system, tools=self.config.tools.specs() or None)
-                chat.user(_msg_text(first))
-                try:
-                    async for step in self._step_loop():
-                        yield step
-                finally:
-                    self._chat = None
+            )
+            self._chat = chat
+            if self.config.system:
+                chat.system(self.config.system, tools=self.config.tools.specs() or None)
+            chat.user(_msg_text(first))
+            error: Exception | None = None
+            try:
+                async for step in self._step_loop():
+                    yield step
+            except Exception as exc:
+                error = exc
+                raise
+            finally:
+                self._chat = None
+                chat.end(error)
         else:
             async for step in self._step_loop():
                 yield step
 
+    def _prune_children(self) -> None:
+        """Remove completed children that are not tracked as bg tasks."""
+        bg_child_ids = {info.child.id for info in self._bg_tasks.values()}
+        self.flow.children = [
+            child for child in self.flow.children
+            if (child._task is not None and not child._task.done())
+            or child.id in bg_child_ids
+        ]
+
     async def _step_loop(self) -> AsyncGenerator[StepResult, None]:
         while True:
+            self._prune_children()
             self.rounds += 1
             tool_calls = await self._call_llm()
             if not tool_calls:
@@ -297,8 +429,15 @@ class Agent(Generic[Ctx]):
         """Wait for all background tasks to complete."""
         if not self._bg_tasks:
             return
-        done, _ = await asyncio.wait(self._bg_tasks)
-        self._bg_tasks -= done
+        tasks = [info.task for info in self._bg_tasks.values()]
+        await asyncio.wait(tasks)
+        # Remove completed bg tasks
+        done_ids = [
+            call_id for call_id, info in self._bg_tasks.items()
+            if info.task.done()
+        ]
+        for call_id in done_ids:
+            del self._bg_tasks[call_id]
 
     async def _call_llm(self) -> list[yuullm.ToolCall]:
         return await self._stream_llm(self._chat)
@@ -433,7 +572,6 @@ class Agent(Generic[Ctx]):
             child_defer_tasks[cdt] = call_id
 
         self_deferred: set[str] = set()  # call_ids that self-deferred
-        timed_out = False
 
         while pending:
             signals = {defer_task} | set(child_defer_tasks)
@@ -455,10 +593,10 @@ class Agent(Generic[Ctx]):
                 break
 
             if timeout_task is not None and timeout_task in done:
-                timed_out = True
-                # Cancel all still-pending tool tasks
-                for t in pending:
-                    t.cancel()
+                # Defer all still-pending tool tasks to background
+                for call_id, (tc, child, task, span) in tasks.items():
+                    if task in pending:
+                        self_deferred.add(call_id)
                 break
 
         if not defer_task.done():
@@ -473,8 +611,7 @@ class Agent(Generic[Ctx]):
         for call_id, (tc, child, task, span) in tasks.items():
             if task.done() and call_id not in self_deferred:
                 if task.cancelled():
-                    # Tool was cancelled by batch timeout
-                    content = "[timeout] tool execution cancelled"
+                    content = "[cancelled] tool execution cancelled"
                     self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=content))
                     self.messages.append(yuullm.tool(call_id, content))
                     if span is not None:
@@ -484,15 +621,6 @@ class Agent(Generic[Ctx]):
                     output = task.result()
                     self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=output))
                     self.messages.append(yuullm.tool(call_id, output))
-            elif timed_out and call_id not in self_deferred:
-                # Still pending when batch timed out — cancel and report
-                task.cancel()
-                content = "[timeout] tool execution cancelled"
-                self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=content))
-                self.messages.append(yuullm.tool(call_id, content))
-                if span is not None:
-                    span.fail(content)
-                    span.end()
             else:
                 run_id = child.id
                 # Include partial output from self-defer if available.
@@ -506,9 +634,14 @@ class Agent(Generic[Ctx]):
                     yuullm.tool(call_id, content)
                 )
                 # Pass span to bg_finish so it can end the span when done
-                bg = asyncio.create_task(self._bg_finish(run_id, task, span))
-                self._bg_tasks.add(bg)
-                bg.add_done_callback(self._bg_tasks.discard)
+                bg = asyncio.create_task(self._bg_finish(call_id, run_id, task, span))
+                self._bg_tasks[call_id] = _BgTaskInfo(
+                    call_id=call_id,
+                    tool_name=tc.name,
+                    child=child,
+                    task=bg,
+                    tool_task=task,
+                )
 
         # End tools batch span (background tool spans outlive it — fine per OTEL)
         if tools_ctx is not None:
@@ -516,6 +649,7 @@ class Agent(Generic[Ctx]):
 
     async def _bg_finish(
         self,
+        call_id: str,
         run_id: str,
         task: asyncio.Task[str],
         span: ytrace.ToolSpan | None,
@@ -539,6 +673,7 @@ class Agent(Generic[Ctx]):
         if self._chat is not None:
             self._chat.user(text)
         self.flow.send(yuullm.user(text))
+        self._bg_tasks.pop(call_id, None)
 
     def _drain_mailbox(self) -> bool:
         """Drain pending messages from the mailbox. Returns True if any were drained."""

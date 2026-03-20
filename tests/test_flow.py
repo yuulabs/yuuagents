@@ -15,6 +15,7 @@ from yuuagents.agent import AgentConfig
 from yuuagents.types import StepResult
 from yuuagents.core.flow import (
     Agent,
+    AgentState,
     Flow,
     ToolResult,
     UserMessage,
@@ -801,20 +802,24 @@ async def test_steps_session_host_break_syncs():
 
 @pytest.mark.asyncio
 async def test_tool_batch_timeout():
-    """tool_batch_timeout cancels slow tools with synthetic result."""
+    """tool_batch_timeout defers slow tools to background instead of cancelling."""
 
     @yt.tool()
-    async def hang() -> str:
-        """Never returns."""
-        await asyncio.sleep(999)
-        return "unreachable"
+    async def slow() -> str:
+        """Slower than batch timeout but finishes eventually."""
+        await asyncio.sleep(0.3)
+        return "slow-done"
 
     manager: yt.ToolManager = yt.ToolManager()
-    manager.register(hang)
+    manager.register(slow)
 
     script = [
-        [yuullm.ToolCall(id="tc1", name="hang", arguments="{}")],
-        [yuullm.Response(item="Got timeout result.")],
+        [yuullm.ToolCall(id="tc1", name="slow", arguments="{}")],
+        # After defer, LLM sees "Moved to background" and replies.
+        [yuullm.Response(item="Got background result.")],
+        # _wait_pending_bg waits for bg task; once done, _bg_finish sends
+        # a "[bg:...] slow-done" user message which triggers one more LLM call.
+        [yuullm.Response(item="Done.")],
     ]
     client = make_client(script)
 
@@ -823,7 +828,280 @@ async def test_tool_batch_timeout():
     agent.send_first("Go")
     await run_agent(agent)
 
-    # Check that the tool result contains timeout message
+    # Check that the tool result is a background-defer message
     tool_results = [e for e in agent.flow.stem if isinstance(e, ToolResult)]
     assert len(tool_results) == 1
-    assert "[timeout]" in tool_results[0].output
+    assert "Moved to background" in tool_results[0].output
+
+
+# ---------------------------------------------------------------------------
+# Tests: AgentState snapshot / kill / tree pruning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_snapshot_returns_valid_state_at_step_boundary():
+    """snapshot() at a step boundary returns valid AgentState."""
+    script = [
+        [yuullm.Response(item="Hello!")],
+    ]
+    client = make_client(script)
+    manager: yt.ToolManager = yt.ToolManager()
+
+    agent = make_agent(client, manager, system="sys")
+    agent.start()
+    agent.send_first("Hi")
+    await run_agent(agent)
+
+    state = await agent.snapshot()
+    assert isinstance(state, AgentState)
+    assert len(state.messages) == 3  # system + user + assistant
+    assert state.rounds == 1
+    assert state.conversation_id is not None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_blocks_when_bg_tasks_pending():
+    """snapshot() without as_interrupted waits for bg tasks."""
+    released = asyncio.Event()
+
+    @yt.tool()
+    async def hold() -> str:
+        await released.wait()
+        return "done"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(hold)
+    client = make_client(
+        [
+            [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
+            [yuullm.Response(item="ok")],
+            [yuullm.Response(item="bg done")],
+        ]
+    )
+    agent = make_agent(client, manager)
+    agent.start()
+    agent.send_first("Go")
+
+    wait_task = asyncio.create_task(run_agent(agent))
+    await asyncio.sleep(0.02)
+    agent.send("bg", defer_tools=True)
+    await asyncio.sleep(0.02)
+
+    assert agent.has_pending_background
+
+    # snapshot() should block until bg tasks complete
+    snapshot_task = asyncio.create_task(agent.snapshot())
+    await asyncio.sleep(0.02)
+    assert not snapshot_task.done()
+
+    released.set()
+    state = await snapshot_task
+    await wait_task
+
+    assert isinstance(state, AgentState)
+    assert not agent.has_pending_background
+
+
+@pytest.mark.asyncio
+async def test_snapshot_as_interrupted_returns_immediately_with_bg():
+    """snapshot(as_interrupted=True) returns immediately with synthetic results."""
+    released = asyncio.Event()
+
+    @yt.tool()
+    async def hold() -> str:
+        await released.wait()
+        return "done"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(hold)
+    client = make_client(
+        [
+            [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
+            [yuullm.Response(item="ok")],
+            [yuullm.Response(item="bg done")],
+        ]
+    )
+    agent = make_agent(client, manager)
+    agent.start()
+    agent.send_first("Go")
+
+    wait_task = asyncio.create_task(run_agent(agent))
+    await asyncio.sleep(0.02)
+    agent.send("bg", defer_tools=True)
+    await asyncio.sleep(0.02)
+
+    assert agent.has_pending_background
+
+    state = await agent.snapshot(as_interrupted=True)
+    assert isinstance(state, AgentState)
+    # Should have an interrupted tool result in messages
+    interrupted_msgs = [m for m in state.messages if m[0] == "tool"]
+    assert any("[interrupted]" in str(m[1]) for m in interrupted_msgs)
+
+    # Original messages NOT mutated
+    assert not any(
+        m[0] == "tool" and "[interrupted]" in str(m[1])
+        for m in agent.messages
+    )
+
+    released.set()
+    await wait_task
+
+
+@pytest.mark.asyncio
+async def test_kill_cancels_recursively_and_preserves_stem_output():
+    """kill() cancels bg tasks and synthesises interrupted results in messages."""
+    released = asyncio.Event()
+
+    @yt.tool()
+    async def hold() -> str:
+        await released.wait()
+        return "done"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(hold)
+    client = make_client(
+        [
+            [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
+            [yuullm.Response(item="ok")],
+        ]
+    )
+    agent = make_agent(client, manager)
+    agent.start()
+    agent.send_first("Go")
+
+    # Need to manually drive steps so we can kill mid-run
+    async def _drive():
+        async with aclosing(agent.steps()) as gen:
+            async for step in gen:
+                if not step.done:
+                    break
+
+    drive_task = asyncio.create_task(_drive())
+    await asyncio.sleep(0.02)
+    agent.send("bg", defer_tools=True)
+    await asyncio.sleep(0.05)
+    await drive_task
+
+    assert agent.has_pending_background
+
+    await agent.kill()
+
+    assert not agent.has_pending_background
+    # Messages should now contain the interrupted tool result
+    tool_msgs = [m for m in agent.messages if m[0] == "tool"]
+    assert any("[interrupted]" in str(m[1]) for m in tool_msgs)
+
+    # snapshot() after kill should return immediately
+    state = await agent.snapshot()
+    assert isinstance(state, AgentState)
+
+    released.set()  # cleanup
+
+
+@pytest.mark.asyncio
+async def test_kill_then_snapshot_succeeds():
+    """After kill(), snapshot() returns valid state immediately."""
+    script = [
+        [yuullm.Response(item="Hello!")],
+    ]
+    client = make_client(script)
+    manager: yt.ToolManager = yt.ToolManager()
+
+    agent = make_agent(client, manager)
+    agent.start()
+    agent.send_first("Hi")
+    await run_agent(agent)
+
+    # kill() with no bg tasks is a no-op
+    await agent.kill()
+    state = await agent.snapshot()
+    assert isinstance(state, AgentState)
+    assert not agent.has_pending_background
+
+
+@pytest.mark.asyncio
+async def test_flow_tree_pruned_between_steps():
+    """Completed tool children are pruned between steps."""
+
+    @yt.tool()
+    async def fast() -> str:
+        return "ok"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(fast)
+
+    script = [
+        [yuullm.ToolCall(id="tc1", name="fast", arguments="{}")],
+        [yuullm.ToolCall(id="tc2", name="fast", arguments="{}")],
+        [yuullm.Response(item="done")],
+    ]
+    client = make_client(script)
+
+    agent = make_agent(client, manager)
+    agent.start()
+    agent.send_first("Go")
+
+    step_count = 0
+    async with aclosing(agent.steps()) as gen:
+        async for step in gen:
+            step_count += 1
+            if step_count == 2:
+                # After second step, first step's children should be pruned
+                # Only the children from the current step should remain (or be pruned too if done)
+                assert len(agent.flow.children) <= 1  # at most current step's children
+
+    # After completion, all children should be pruned
+    assert len(agent.flow.children) == 0
+
+
+@pytest.mark.asyncio
+async def test_flow_tree_keeps_deferred_children():
+    """Deferred (background) children are NOT pruned."""
+    released = asyncio.Event()
+
+    @yt.tool()
+    async def hold() -> str:
+        await released.wait()
+        return "done"
+
+    manager: yt.ToolManager = yt.ToolManager()
+    manager.register(hold)
+    client = make_client(
+        [
+            [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
+            [yuullm.Response(item="ok")],
+            [yuullm.Response(item="bg done")],
+        ]
+    )
+    agent = make_agent(client, manager)
+    agent.start()
+    agent.send_first("Go")
+
+    wait_task = asyncio.create_task(run_agent(agent))
+    await asyncio.sleep(0.02)
+    agent.send("bg", defer_tools=True)
+    await asyncio.sleep(0.05)
+
+    # The deferred child should still be in the tree
+    assert len(agent.flow.children) >= 1
+
+    released.set()
+    await wait_task
+
+
+def test_delegate_no_dual_iteration():
+    """_monitor_delegate removed — delegate tool owns child iteration."""
+    from yuuagents.daemon.manager import AgentManager
+    assert not hasattr(AgentManager, "_monitor_delegate")
+
+
+def test_delegate_exception_not_swallowed():
+    """delegate tool catches Exception but re-raises CancelledError."""
+    from pathlib import Path
+    source = Path("src/yuuagents/tools/delegate.py").read_text()
+    # Verify the source does NOT contain `except BaseException`
+    assert "except BaseException" not in source
+    # Verify it contains `except asyncio.CancelledError` (re-raise pattern)
+    assert "except asyncio.CancelledError" in source

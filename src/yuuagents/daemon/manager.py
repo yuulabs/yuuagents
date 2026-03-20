@@ -21,7 +21,7 @@ from yuuagents.config import Config, ProviderConfig
 from yuuagents.context import AgentContext
 from yuuagents.core.flow import render_agent_event
 from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT, DockerManager
-from yuuagents.persistence import TaskPersistence, TaskRecorder, TaskWriter
+from yuuagents.persistence import TaskPersistence, TaskWriter
 from yuuagents.prompts import get_vars as get_prompt_vars
 from yuuagents.runtime_session import Session
 from yuuagents.tools import BUILTIN_TOOLS
@@ -61,7 +61,7 @@ class AgentManager:
     _tasks: dict[str, asyncio.Task[None]] = field(factory=dict)
     _persistence: TaskPersistence | None = None
     _writer: TaskWriter | None = None
-    _recorders: dict[str, TaskRecorder] = field(factory=dict)
+    _snapshot_turn: dict[str, int] = field(factory=dict)  # task_id -> last persisted turn
     _delegate_sessions_by_run_id: dict[str, Session] = field(factory=dict)
 
     async def start(self) -> None:
@@ -80,7 +80,7 @@ class AgentManager:
         self._tasks.clear()
         self._sessions.clear()
         self._contexts.clear()
-        self._recorders.clear()
+        self._snapshot_turn.clear()
         self._delegate_sessions_by_run_id.clear()
         if self._writer is not None:
             await self._writer.stop()
@@ -135,24 +135,7 @@ class AgentManager:
             parent_flow = parent_agent.flow.find(parent_run_id)
             if parent_flow is not None and child_agent.flow not in parent_flow.children:
                 parent_flow.children.append(child_agent.flow)
-        self._tasks[task_id] = asyncio.create_task(
-            self._monitor_delegate(child),
-            name=f"delegate-{agent}-{task_id}",
-        )
         return child
-
-    async def _monitor_delegate(self, child: Session) -> None:
-        try:
-            async for _step in child.step_iter():
-                pass
-            child.status = AgentStatus.DONE
-        except asyncio.CancelledError:
-            child.status = AgentStatus.CANCELLED
-        except Exception as exc:
-            child.status = AgentStatus.ERROR
-            child.error = _make_error(exc)
-        finally:
-            self._tasks.pop(child.task_id, None)
 
     def inspect_run(
         self,
@@ -286,28 +269,29 @@ class AgentManager:
         return f"Wait finished for runs: {ids}"
 
     async def _run(self, session: Session, task: str, *, resume: bool) -> None:
-        recorder = self._get_recorder(session.task_id)
         session.status = AgentStatus.RUNNING
         session.start(task)
         try:
             async for _step in session.step_iter():
-                pass
+                if not session.has_pending_background:
+                    await self._persist_snapshot(session)
             session.status = AgentStatus.DONE
             await self._write_terminal(session.task_id, AgentStatus.DONE, None)
         except asyncio.CancelledError:
+            await session.kill()
+            await self._persist_snapshot(session)
             session.status = AgentStatus.CANCELLED
             await self._write_terminal(session.task_id, AgentStatus.CANCELLED, None)
         except Exception as exc:
+            await session.kill()
             err = _make_error(exc)
             session.status = AgentStatus.ERROR
             session.error = err
             err_json = msgspec.json.encode(err)
+            await self._persist_snapshot(session)
             await self._write_terminal(session.task_id, AgentStatus.ERROR, err_json)
             logger.exception("agent {agent_id} task {task_id} failed",
                              agent_id=session.agent_id, task_id=session.task_id)
-        finally:
-            if recorder is not None:
-                recorder.record_history(session.history, session.steps)
 
     async def list_agents(self) -> list[AgentInfo]:
         if self._persistence is None:
@@ -402,15 +386,33 @@ class AgentManager:
         parts.append("</agents>")
         return "\n".join(parts)
 
-    def _get_recorder(self, task_id: str) -> TaskRecorder | None:
+    async def _persist_snapshot(
+        self,
+        session: Session,
+        *,
+        as_interrupted: bool = False,
+    ) -> None:
+        """Persist the current agent state as a snapshot checkpoint."""
         if self._writer is None:
-            return None
-        existing = self._recorders.get(task_id)
-        if existing is not None:
-            return existing
-        recorder = TaskRecorder(task_id=task_id, writer=self._writer)
-        self._recorders[task_id] = recorder
-        return recorder
+            return
+        try:
+            state = await session.snapshot(as_interrupted=as_interrupted)
+        except RuntimeError:
+            return
+        turn = self._snapshot_turn.get(session.task_id, 0) + 1
+        self._snapshot_turn[session.task_id] = turn
+        from yuuagents.persistence import _BufferedCheckpoint
+        from datetime import datetime, timezone
+        payload = msgspec.json.encode(state)
+        cp = _BufferedCheckpoint(
+            task_id=session.task_id,
+            turn=turn,
+            phase="snapshot",
+            ts=datetime.now(timezone.utc),
+            payload=payload,
+            status_after=session.status,
+        )
+        await self._writer.append_checkpoint(cp)
 
     async def _write_terminal(
         self,
@@ -550,7 +552,9 @@ class AgentManager:
             for entry in provider_cfg.pricing
         ]
         data = [{"provider": provider_name, "models": models}]
-        tmp = Path(tempfile.mktemp(suffix=".yaml"))
+        fd = tempfile.NamedTemporaryFile(suffix=".yaml", delete=False)
+        tmp = Path(fd.name)
+        fd.close()
         try:
             tmp.write_text(yaml.dump(data), encoding="utf-8")
             return yuullm.PriceCalculator(yaml_path=tmp)
@@ -574,56 +578,6 @@ class AgentManager:
             "delete_file",
             "web_search",
         ]
-
-    async def _load_task(self, task_id: str) -> None:
-        if self._persistence is None:
-            raise KeyError(task_id)
-        if task_id in self._sessions:
-            return
-        row = await self._persistence.get_task_row(task_id)
-        if row is None:
-            raise KeyError(task_id)
-        err: ErrorInfo | None = None
-        if row.error_json is not None:
-            err = msgspec.json.decode(row.error_json, type=ErrorInfo)
-        llm_client = self._make_llm(agent_name=row.agent_id, model_override=row.model)
-        tool_names = msgspec.json.decode(row.tools_json, type=list[str])
-        tool_names = tool_names or self._default_tools(row.agent_id)
-        tool_objs = [BUILTIN_TOOLS[name] for name in tool_names if name in BUILTIN_TOOLS]
-        manager = yt.ToolManager(tool_objs)
-        config = AgentConfig(
-            agent_id=row.agent_id,
-            tools=manager,
-            llm=llm_client,
-            system=row.system_prompt,
-        )
-        container_id = await self.docker.resolve(
-            task_id=row.task_id,
-            container=row.docker_container,
-        )
-        ctx = AgentContext(
-            task_id=row.task_id,
-            agent_id=row.agent_id,
-            workdir=self.docker.workdir,
-            docker_container=container_id,
-            delegate_depth=0,
-            manager=self,
-            docker=self.docker,
-            tavily_api_key=os.environ.get(self.config.tavily.api_key_env, ""),
-        )
-        session = Session(
-            config=config,
-            context=ctx,
-            task=row.task,
-            history=await self._persistence.load_history(task_id),
-            status=AgentStatus(row.status),
-            error=err,
-            stored_steps=row.head_turn,
-            created_at=row.created_at,
-            mailbox_id=row.task_id,
-        )
-        self._sessions[task_id] = session
-        self._contexts[task_id] = ctx
 
     async def _build_session(
         self,

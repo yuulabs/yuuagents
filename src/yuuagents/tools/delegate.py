@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import yuutools as yt
 
 from yuuagents.context import (
@@ -9,6 +11,7 @@ from yuuagents.context import (
     DelegateManager,
 )
 from yuuagents.runtime_session import Session
+from yuuagents.types import AgentStatus
 
 
 def _last_assistant_text(session: Session) -> str:
@@ -73,6 +76,10 @@ async def delegate(
     try:
         async for _step in child.step_iter():
             pass
-    except BaseException:
-        pass
+        child.status = AgentStatus.DONE
+    except asyncio.CancelledError:
+        child.status = AgentStatus.CANCELLED
+        raise
+    except Exception:
+        child.status = AgentStatus.ERROR
     return _last_assistant_text(child) or child.status.value

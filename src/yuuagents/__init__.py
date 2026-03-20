@@ -15,6 +15,7 @@ from yuutools import (
 # yuuagents own symbols
 from yuuagents.agent import AgentConfig
 from yuuagents.context import AgentContext
+from yuuagents.core.flow import AgentState
 from yuuagents.runtime_session import Session
 from yuuagents.types import AgentInfo, AgentStatus, StepResult, TaskRequest
 
@@ -33,6 +34,7 @@ __all__ = [
     "DependencyMarker",
     # from yuuagents
     "AgentConfig",
+    "AgentState",
     "AgentContext",
     "Session",
     "AgentStatus",

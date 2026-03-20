@@ -31,7 +31,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from yuuagents.types import AgentInfo, AgentStatus, ErrorInfo
 
-Phase = Literal["llm", "tool"]
+Phase = Literal["llm", "tool", "snapshot"]
 
 _json_encoder = msgspec.json.Encoder()
 
