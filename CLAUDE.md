@@ -69,5 +69,4 @@ CLI (click) ──HTTP/Unix socket──▶ Daemon (Starlette/uvicorn)
 ## Design Docs
 
 Read `design/` before making architectural changes:
-- `design/refactor.md` — Flow refactor plan: replacing loop/step with Flow/Agent in `core/flow.py`
-- `design/persistent.md` — Task persistence (append-only log + checkpoint replay)
+- `design/persistent.md` — Snapshot-based task persistence (AgentState snapshots to SQLite)
