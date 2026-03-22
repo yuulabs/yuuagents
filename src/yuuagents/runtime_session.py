@@ -170,3 +170,53 @@ class Session:
         finally:
             if self.agent is not None:
                 self.history = list(self.agent.messages)
+
+    # -- typed helpers (avoid getattr chains in external code) --
+
+    def has_tool_call(self, tool_name: str, *, argument_contains: str = "") -> bool:
+        """Check if any tool call in the stem matches the given name and optional argument substring."""
+        if self.agent is None:
+            return False
+        for event in self.agent.flow.stem:
+            if not isinstance(event, yuullm.ToolCall):
+                continue
+            if event.name != tool_name:
+                continue
+            if argument_contains and argument_contains not in (event.arguments or ""):
+                continue
+            return True
+        return False
+
+    def find_flow(self, flow_id: str) -> Flow | None:
+        """Find a flow by ID in the agent's flow tree."""
+        if self.agent is None:
+            return None
+        return self.agent.flow.find(flow_id)
+
+    def render_flow(self, flow_id: str, limit: int = 200) -> str:
+        """Render a flow's stem events to text."""
+        if self.agent is None:
+            return ""
+        flow = self.agent.flow.find(flow_id)
+        if flow is None:
+            return ""
+        from yuuagents.core.flow import render_agent_event
+
+        return flow.render(render_agent_event, limit=limit)
+
+    def attach_child_flow(self, parent_flow_id: str, child_flow: Flow) -> bool:
+        """Attach a child flow to a parent flow in the tree. Returns True if successful."""
+        if self.agent is None:
+            return False
+        parent = self.agent.flow.find(parent_flow_id)
+        if parent is None:
+            return False
+        if child_flow not in parent.children:
+            parent.children.append(child_flow)
+        return True
+
+    async def wait(self) -> None:
+        """Wait for the agent's flow to complete."""
+        if self.agent is None:
+            return
+        await self.agent.flow.wait()
