@@ -18,7 +18,7 @@ def _last_assistant_text(session: Session) -> str:
     for role, items in reversed(session.history):
         if role != "assistant":
             continue
-        text = "".join(item for item in items if isinstance(item, str)).strip()
+        text = "".join(item["text"] for item in items if item.get("type") == "text").strip()
         if text:
             return text
     return ""

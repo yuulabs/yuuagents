@@ -176,7 +176,7 @@ def test_flow_render():
 async def test_agent_text_response():
     """Agent receives a task, LLM responds with text only, agent finishes."""
     script = [
-        [yuullm.Response(item="Hello from the LLM!")],
+        [yuullm.Response(item={"type": "text", "text": "Hello from the LLM!"})],
     ]
     client = make_client(script)
     manager: yt.ToolManager = yt.ToolManager()
@@ -204,7 +204,7 @@ async def test_agent_text_response():
 @pytest.mark.asyncio
 async def test_agent_merges_streamed_text_chunks_before_persisting_history():
     client = make_client(
-        [[yuullm.Response(item="现在 "), yuullm.Response(item="我需要"), yuullm.Response(item="回复用户。")]]
+        [[yuullm.Response(item={"type": "text", "text": "现在 "}), yuullm.Response(item={"type": "text", "text": "我需要"}), yuullm.Response(item={"type": "text", "text": "回复用户。"})]]
     )
     manager: yt.ToolManager = yt.ToolManager()
 
@@ -213,7 +213,7 @@ async def test_agent_merges_streamed_text_chunks_before_persisting_history():
     agent.send_first("hi")
     await run_agent(agent)
 
-    assert agent.messages[-1] == ("assistant", ["现在 我需要回复用户。"])
+    assert agent.messages[-1] == ("assistant", [{"type": "text", "text": "现在 我需要回复用户。"}])
 
 
 @pytest.mark.asyncio
@@ -236,7 +236,7 @@ async def test_session_exposes_last_and_total_usage_and_cost():
         total_cost=0.0018,
     )
     client = make_client(
-        [[yuullm.Response(item="done")]],
+        [[yuullm.Response(item={"type": "text", "text": "done"})]],
         stores=[{"usage": usage, "cost": cost}],
     )
     manager: yt.ToolManager = yt.ToolManager()
@@ -266,7 +266,7 @@ async def test_session_exposes_last_and_total_usage_and_cost():
 
 
 @pytest.mark.asyncio
-async def test_llm_usage_and_cost_are_recorded_on_llm_gen_span():
+async def test_llm_usage_and_cost_are_recorded_on_conversation_span():
     usage = yuullm.Usage(
         provider="fake",
         model="fake-model",
@@ -283,7 +283,7 @@ async def test_llm_usage_and_cost_are_recorded_on_llm_gen_span():
         source="fake-prices",
     )
     client = make_client(
-        [[yuullm.Response(item="done")]],
+        [[yuullm.Response(item={"type": "text", "text": "done"})]],
         stores=[{"usage": usage, "cost": cost}],
     )
     manager: yt.ToolManager = yt.ToolManager()
@@ -303,16 +303,14 @@ async def test_llm_usage_and_cost_are_recorded_on_llm_gen_span():
     assert conv is not None
     spans = conv["spans"]
 
-    llm_span = next(span for span in spans if span["name"] == "llm_gen")
     conversation_span = next(span for span in spans if span["name"] == "conversation")
+    event_names = [event["name"] for event in conversation_span["events"]]
 
-    llm_event_names = [event["name"] for event in llm_span["events"]]
-    conversation_event_names = [event["name"] for event in conversation_span["events"]]
-
-    assert "yuu.llm.usage" in llm_event_names
-    assert "yuu.cost" in llm_event_names
-    assert "yuu.llm.usage" not in conversation_event_names
-    assert "yuu.cost" not in conversation_event_names
+    # Usage/cost events are now on the conversation span (via TurnContext.usage)
+    assert "yuu.llm.usage" in event_names
+    assert "yuu.cost" in event_names
+    # Turn events for user and assistant are also on the conversation span
+    assert "yuu.turn" in event_names
 
 
 @pytest.mark.asyncio
@@ -325,8 +323,8 @@ async def test_session_resume_preserves_conversation_id():
 
     client = make_client(
         [
-            [yuullm.Response(item="first")],
-            [yuullm.Response(item="second")],
+            [yuullm.Response(item={"type": "text", "text": "first"})],
+            [yuullm.Response(item={"type": "text", "text": "second"})],
         ]
     )
     manager: yt.ToolManager = yt.ToolManager()
@@ -377,8 +375,8 @@ async def test_resume_trace_records_system_and_tools():
     manager.register(ping)
     client = make_client(
         [
-            [yuullm.Response(item="first")],
-            [yuullm.Response(item="second")],
+            [yuullm.Response(item={"type": "text", "text": "first"})],
+            [yuullm.Response(item={"type": "text", "text": "second"})],
         ]
     )
     config = AgentConfig(
@@ -438,7 +436,7 @@ async def test_agent_tool_call():
     # Script: first LLM call returns a tool call, second returns text
     script = [
         [yuullm.ToolCall(id="tc1", name="add", arguments='{"a": 2, "b": 3}')],
-        [yuullm.Response(item="The sum is 5.")],
+        [yuullm.Response(item={"type": "text", "text": "The sum is 5."})],
     ]
     client = make_client(script)
 
@@ -483,7 +481,7 @@ async def test_agent_mailbox_drain():
 
     script = [
         [yuullm.ToolCall(id="tc1", name="slow_tool", arguments="{}")],
-        [yuullm.Response(item="All done.")],
+        [yuullm.Response(item={"type": "text", "text": "All done."})],
     ]
     client = make_client(script)
 
@@ -499,7 +497,12 @@ async def test_agent_mailbox_drain():
 
     # The "ping" should appear in messages as a user message
     user_msgs = [m for m in agent.messages if m[0] == "user"]
-    texts = [m[1] if isinstance(m[1], str) else str(m[1]) for m in user_msgs]
+    texts = [
+        item.get("text", "")
+        for m in user_msgs
+        for item in m[1]
+        if isinstance(item, dict) and item.get("type") == "text"
+    ]
     assert any("ping" in t for t in texts)
 
 
@@ -518,9 +521,9 @@ async def test_background_tool_flow_waits_for_completion():
         [
             [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
             # After defer, LLM sees "background it" + deferred result
-            [yuullm.Response(item="finished")],
+            [yuullm.Response(item={"type": "text", "text": "finished"})],
             # After bg completes, _bg_finish sends a user message → triggers another LLM round
-            [yuullm.Response(item="bg complete")],
+            [yuullm.Response(item={"type": "text", "text": "bg complete"})],
         ]
     )
     agent = make_agent(client, manager)
@@ -599,8 +602,8 @@ def test_render_agent_event():
 
 def test_normalize_assistant_items_merges_text_and_groups_tool_calls():
     items = [
-        "消",
-        "息",
+        {"type": "text", "text": "消"},
+        {"type": "text", "text": "息"},
         {
             "type": "tool_call",
             "id": "tc1",
@@ -613,15 +616,15 @@ def test_normalize_assistant_items_merges_text_and_groups_tool_calls():
             "name": "read_cap_doc",
             "arguments": {"name": "im"},
         },
-        "已",
-        "发送",
-        "！",
+        {"type": "text", "text": "已"},
+        {"type": "text", "text": "发送"},
+        {"type": "text", "text": "！"},
     ]
 
     normalized = _normalize_assistant_items(items)
 
     assert normalized == [
-        "消息",
+        {"type": "text", "text": "消息"},
         {
             "type": "tool_calls",
             "tool_calls": [
@@ -639,7 +642,7 @@ def test_normalize_assistant_items_merges_text_and_groups_tool_calls():
                 },
             ],
         },
-        "已发送！",
+        {"type": "text", "text": "已发送！"},
     ]
     assert [_trace_item(item) for item in normalized] == [
         {"type": "text", "text": "消息"},
@@ -679,7 +682,7 @@ def test_trace_items_for_log_keeps_runtime_tool_call_shape_out_of_messages():
 def test_trace_items_for_log_merges_reasoning_chunks():
     traced = _trace_items_for_log(
         ["现在", " 我", " 需要", " 回复"],
-        ["已", "发送"],
+        [{"type": "text", "text": "已"}, {"type": "text", "text": "发送"}],
     )
 
     assert traced == [
@@ -708,7 +711,7 @@ async def test_steps_basic_flow():
     script = [
         [yuullm.ToolCall(id="tc1", name="noop", arguments="{}")],
         [yuullm.ToolCall(id="tc2", name="noop", arguments="{}")],
-        [yuullm.Response(item="All done.")],
+        [yuullm.Response(item={"type": "text", "text": "All done."})],
     ]
     client = make_client(script)
 
@@ -746,7 +749,7 @@ async def test_steps_host_break_preserves_history():
     script = [
         [yuullm.ToolCall(id="tc1", name="slow", arguments="{}")],
         [yuullm.ToolCall(id="tc2", name="slow", arguments="{}")],
-        [yuullm.Response(item="done")],
+        [yuullm.Response(item={"type": "text", "text": "done"})],
     ]
     client = make_client(script)
 
@@ -782,7 +785,7 @@ async def test_steps_session_host_break_syncs():
     script = [
         [yuullm.ToolCall(id="tc1", name="noop", arguments="{}")],
         [yuullm.ToolCall(id="tc2", name="noop", arguments="{}")],
-        [yuullm.Response(item="done")],
+        [yuullm.Response(item={"type": "text", "text": "done"})],
     ]
     client = make_client(script)
     session = Session(
@@ -816,10 +819,10 @@ async def test_tool_batch_timeout():
     script = [
         [yuullm.ToolCall(id="tc1", name="slow", arguments="{}")],
         # After defer, LLM sees "Moved to background" and replies.
-        [yuullm.Response(item="Got background result.")],
+        [yuullm.Response(item={"type": "text", "text": "Got background result."})],
         # _wait_pending_bg waits for bg task; once done, _bg_finish sends
         # a "[bg:...] slow-done" user message which triggers one more LLM call.
-        [yuullm.Response(item="Done.")],
+        [yuullm.Response(item={"type": "text", "text": "Done."})],
     ]
     client = make_client(script)
 
@@ -843,7 +846,7 @@ async def test_tool_batch_timeout():
 async def test_snapshot_returns_valid_state_at_step_boundary():
     """snapshot() at a step boundary returns valid AgentState."""
     script = [
-        [yuullm.Response(item="Hello!")],
+        [yuullm.Response(item={"type": "text", "text": "Hello!"})],
     ]
     client = make_client(script)
     manager: yt.ToolManager = yt.ToolManager()
@@ -875,8 +878,8 @@ async def test_snapshot_blocks_when_bg_tasks_pending():
     client = make_client(
         [
             [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
-            [yuullm.Response(item="ok")],
-            [yuullm.Response(item="bg done")],
+            [yuullm.Response(item={"type": "text", "text": "ok"})],
+            [yuullm.Response(item={"type": "text", "text": "bg done"})],
         ]
     )
     agent = make_agent(client, manager)
@@ -918,8 +921,8 @@ async def test_snapshot_as_interrupted_returns_immediately_with_bg():
     client = make_client(
         [
             [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
-            [yuullm.Response(item="ok")],
-            [yuullm.Response(item="bg done")],
+            [yuullm.Response(item={"type": "text", "text": "ok"})],
+            [yuullm.Response(item={"type": "text", "text": "bg done"})],
         ]
     )
     agent = make_agent(client, manager)
@@ -964,7 +967,7 @@ async def test_kill_cancels_recursively_and_preserves_stem_output():
     client = make_client(
         [
             [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
-            [yuullm.Response(item="ok")],
+            [yuullm.Response(item={"type": "text", "text": "ok"})],
         ]
     )
     agent = make_agent(client, manager)
@@ -1004,7 +1007,7 @@ async def test_kill_cancels_recursively_and_preserves_stem_output():
 async def test_kill_then_snapshot_succeeds():
     """After kill(), snapshot() returns valid state immediately."""
     script = [
-        [yuullm.Response(item="Hello!")],
+        [yuullm.Response(item={"type": "text", "text": "Hello!"})],
     ]
     client = make_client(script)
     manager: yt.ToolManager = yt.ToolManager()
@@ -1035,7 +1038,7 @@ async def test_flow_tree_pruned_between_steps():
     script = [
         [yuullm.ToolCall(id="tc1", name="fast", arguments="{}")],
         [yuullm.ToolCall(id="tc2", name="fast", arguments="{}")],
-        [yuullm.Response(item="done")],
+        [yuullm.Response(item={"type": "text", "text": "done"})],
     ]
     client = make_client(script)
 
@@ -1071,8 +1074,8 @@ async def test_flow_tree_keeps_deferred_children():
     client = make_client(
         [
             [yuullm.ToolCall(id="tc1", name="hold", arguments="{}")],
-            [yuullm.Response(item="ok")],
-            [yuullm.Response(item="bg done")],
+            [yuullm.Response(item={"type": "text", "text": "ok"})],
+            [yuullm.Response(item={"type": "text", "text": "bg done"})],
         ]
     )
     agent = make_agent(client, manager)

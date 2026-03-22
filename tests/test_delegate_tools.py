@@ -26,7 +26,7 @@ class _FakeLLM:
         reply = self._replies.pop(0)
 
         async def _iter():
-            yield yuullm.Response(item=reply)
+            yield yuullm.Response(item={"type": "text", "text": reply})
 
         return _iter(), {}
 

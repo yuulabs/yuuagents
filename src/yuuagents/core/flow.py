@@ -123,8 +123,8 @@ def render_agent_event(event: AgentEvent) -> str:
             return f"[user] {text}"
         case yuullm.Reasoning(item=text):
             return f"[thinking] {text}"
-        case yuullm.Response(item=text):
-            return str(text)
+        case yuullm.Response(item=item):
+            return item.get("text", "") if item.get("type") == "text" else str(item)
         case yuullm.ToolCall() as tc:
             return f"[call {tc.name}({tc.arguments or ''})]"
         case ToolResult(name=name, output=out):
@@ -386,7 +386,8 @@ class Agent(Generic[Ctx]):
             self._chat = chat
             if self.config.system:
                 chat.system(self.config.system, tools=self.config.tools.specs() or None)
-            chat.user(_msg_text(first))
+            _, first_items = first
+            chat.user(*first_items)
             error: Exception | None = None
             try:
                 async for step in self._step_loop():
@@ -447,12 +448,19 @@ class Agent(Generic[Ctx]):
     ) -> list[yuullm.ToolCall]:
         if chat is None:
             return await self._stream_llm_step(None)
-        with chat.llm_gen() as gen:
-            return await self._stream_llm_step(gen)
+        turn = chat.start_turn("assistant")
+        try:
+            result = await self._stream_llm_step(turn)
+        except Exception as exc:
+            turn.end(error=exc)
+            raise
+        else:
+            turn.end()
+            return result
 
     async def _stream_llm_step(
         self,
-        gen: ytrace.LlmGenContext | None,
+        turn: ytrace.TurnContext | None,
     ) -> list[yuullm.ToolCall]:
         stream, store = await self.config.llm.stream(
             self.messages, model=self.config.llm.default_model, tools=self.config.tools.specs() or None,
@@ -492,15 +500,11 @@ class Agent(Generic[Ctx]):
         else:
             self.last_cost_usd = 0.0
 
-        # When gen is active via chat.llm_gen(), usage/cost events attach to the
-        # llm_gen span instead of the parent conversation span.
-        if gen is not None:
-            gen.log(_trace_items_for_log(reasoning_items, assistant_items))
+        # Record assistant turn items and usage/cost on the conversation span.
+        if turn is not None:
+            turn.add(*_trace_items_for_log(reasoning_items, assistant_items))
             if usage is not None:
-                if cost is not None:
-                    ytrace.record_llm_cost(usage, cost)
-                else:
-                    ytrace.record_llm_usage(usage)
+                turn.usage(usage, cost=cost)
 
         if assistant_items:
             normalized_items = _normalize_assistant_items(
@@ -684,7 +688,8 @@ class Agent(Generic[Ctx]):
             self.flow.emit(UserMessage(text))
             self.messages.append(msg)
             if self._chat is not None:
-                self._chat.user(text)
+                _, msg_items = msg
+                self._chat.user(*msg_items)
             drained = True
         return drained
 
@@ -696,8 +701,6 @@ class Agent(Generic[Ctx]):
 
 def _trace_item(item: Any) -> Any:
     """Convert an assistant item to a trace-friendly form."""
-    if isinstance(item, str):
-        return {"type": "text", "text": item}
     if isinstance(item, yuullm.Reasoning):
         return {"type": "reasoning", "text": item.item}
     if isinstance(item, dict):
@@ -714,7 +717,7 @@ def _normalize_assistant_items(items: list[Any], *, group_tool_calls: bool = Tru
 
     def _flush_text() -> None:
         if text_parts:
-            normalized.append("".join(text_parts))
+            normalized.append({"type": "text", "text": "".join(text_parts)})
             text_parts.clear()
 
     def _flush_reasoning() -> None:
@@ -734,15 +737,15 @@ def _normalize_assistant_items(items: list[Any], *, group_tool_calls: bool = Tru
             pending_tool_calls.clear()
 
     for item in items:
-        if isinstance(item, str):
-            _flush_reasoning()
-            _flush_tool_calls()
-            text_parts.append(item)
-            continue
         if isinstance(item, yuullm.Reasoning):
             _flush_text()
             _flush_tool_calls()
             reasoning_parts.append(item.item)
+            continue
+        if isinstance(item, dict) and item.get("type") == "text":
+            _flush_reasoning()
+            _flush_tool_calls()
+            text_parts.append(item.get("text", ""))
             continue
         if isinstance(item, dict) and item.get("type") == "tool_call":
             _flush_text()
@@ -776,10 +779,8 @@ def _trace_items_for_log(reasoning_items: list[str], assistant_items: list[Any])
 
 def _msg_text(msg: yuullm.Message) -> str:
     """Extract display text from a yuullm.Message."""
-    _, content = msg
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [c if isinstance(c, str) else json.dumps(c, ensure_ascii=False) for c in content]
-        return "".join(parts)
-    return str(content)
+    _, items = msg
+    return "".join(
+        item["text"] if item.get("type") == "text" else json.dumps(item, ensure_ascii=False)
+        for item in items
+    )

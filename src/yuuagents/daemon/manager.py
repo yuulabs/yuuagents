@@ -436,11 +436,10 @@ class AgentManager:
             text_parts: list[str] = []
             tool_names: list[str] = []
             for item in items:
-                if isinstance(item, str):
-                    text_parts.append(item)
+                if item.get("type") == "text":
+                    text_parts.append(item["text"])
                 elif (
-                    isinstance(item, dict)
-                    and item.get("type") == "tool_call"
+                    item.get("type") == "tool_call"
                     and isinstance(item.get("name"), str)
                 ):
                     tool_names.append(str(item["name"]))

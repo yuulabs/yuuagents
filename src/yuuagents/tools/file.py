@@ -10,7 +10,7 @@ import yuutools as yt
 
 from yuuagents.context import DockerExecutor
 
-_READ_FILE_MAX_BYTES = 8192
+_READ_FILE_MAX_LINES = 200
 _READ_IMAGE_EXTS = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -53,12 +53,13 @@ async def read_file(
         "\n"
         f"path = base64.b64decode({path_b64!r}).decode('utf-8')\n"
         f"mime_map = json.loads({mime_json!r})\n"
-        f"max_bytes = {_READ_FILE_MAX_BYTES}\n"
+        f"max_lines = {_READ_FILE_MAX_LINES}\n"
         f"start_line = {start_line}\n"
         f"end_line = {end_line_expr}\n"
         "p = Path(path)\n"
         "if not p.is_file():\n"
-        "    raise RuntimeError(f'File not found: {path}')\n"
+        "    print(json.dumps({'kind': 'error', 'message': f'File not found: {path}'}, ensure_ascii=False))\n"
+        "    import sys; sys.exit(0)\n"
         "suffix = p.suffix.lower()\n"
         "data = p.read_bytes()\n"
         "if suffix in mime_map:\n"
@@ -67,7 +68,8 @@ async def read_file(
         "    ]\n"
         "    print(json.dumps({'kind': 'image', 'payload': payload}, ensure_ascii=False))\n"
         "elif b'\\x00' in data:\n"
-        "    raise RuntimeError('Binary file is not supported')\n"
+        "    print(json.dumps({'kind': 'error', 'message': 'Binary file is not supported'}, ensure_ascii=False))\n"
+        "    import sys; sys.exit(0)\n"
         "else:\n"
         "    text = data.decode('utf-8')\n"
         "    lines = text.splitlines()\n"
@@ -89,12 +91,14 @@ async def read_file(
         "            if text.endswith('\\n') and selected_end == total_lines:\n"
         "                selected_text += '\\n'\n"
         "            selected_count = len(selected)\n"
-        "    selected_bytes = len(selected_text.encode('utf-8'))\n"
-        "    if selected_bytes > max_bytes:\n"
-        "        raise RuntimeError(\n"
-        "            f'File slice too large to read safely: {selected_bytes} bytes > {max_bytes} bytes '\n"
-        "            f'(path={path}, lines={selected_start}-{selected_end}, total_lines={total_lines})'\n"
-        "        )\n"
+        "    if selected_count > max_lines:\n"
+        "        print(json.dumps({\n"
+        "            'kind': 'error',\n"
+        "            'message': f'Too many lines to read at once: {selected_count} lines > {max_lines} lines. '\n"
+        "                       f'Total lines: {total_lines}. Use start_line/end_line to read in chunks '\n"
+        "                       f'(e.g. start_line=1, end_line={max_lines}).'\n"
+        "        }, ensure_ascii=False))\n"
+        "        import sys; sys.exit(0)\n"
         "    print(json.dumps({\n"
         "        'kind': 'text',\n"
         "        'payload': selected_text,\n"
@@ -108,12 +112,14 @@ async def read_file(
     raw = await docker.exec(container, cmd, timeout=30)
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError:
         msg = raw.strip()
         if msg:
-            raise RuntimeError(msg) from exc
-        raise RuntimeError("read_file returned invalid empty response") from exc
+            return f"[read_file error] {msg}"
+        return "[read_file error] read_file returned empty response"
     kind = payload["kind"]
+    if kind == "error":
+        return f"[read_file error] {payload['message']}"
     if kind == "text":
         total_lines = int(payload["total_lines"])
         start = int(payload["start_line"])
