@@ -28,7 +28,7 @@ class _FakeLLM:
         async def _iter():
             yield yuullm.Response(item={"type": "text", "text": reply})
 
-        return _iter(), {}
+        return _iter(), yuullm.Store()
 
 
 class _FakeManager:

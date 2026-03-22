@@ -121,7 +121,8 @@ def render_agent_event(event: AgentEvent) -> str:
     match event:
         case UserMessage(content=text):
             return f"[user] {text}"
-        case yuullm.Reasoning(item=text):
+        case yuullm.Reasoning(item=item):
+            text = item.get("text", "") if isinstance(item, dict) else str(item)
             return f"[thinking] {text}"
         case yuullm.Response(item=item):
             return item.get("text", "") if item.get("type") == "text" else str(item)
@@ -475,7 +476,7 @@ class Agent(Generic[Ctx]):
             self.flow.emit(item)
             match item:
                 case yuullm.Reasoning(item=reasoning):
-                    reasoning_items.append(reasoning)
+                    reasoning_items.append(reasoning.get("text", "") if isinstance(reasoning, dict) else str(reasoning))
                 case yuullm.Response(item=resp):
                     assistant_items.append(resp)
                 case yuullm.ToolCall() as tc:
@@ -488,14 +489,14 @@ class Agent(Generic[Ctx]):
                     })
 
         # Accumulate token counts
-        usage = store.get("usage")
+        usage = store.usage
         if usage is not None:
             self.last_usage = usage
             self.total_usage = _merge_usage(self.total_usage, usage)
             self.total_tokens = _usage_total_tokens(self.total_usage)
-        cost = store.get("cost")
+        cost = store.cost
         if cost is not None:
-            self.last_cost_usd = float(getattr(cost, "total_cost", 0.0) or 0.0)
+            self.last_cost_usd = float(cost.total_cost or 0.0)
             self.total_cost_usd += self.last_cost_usd
         else:
             self.last_cost_usd = 0.0
@@ -702,7 +703,8 @@ class Agent(Generic[Ctx]):
 def _trace_item(item: Any) -> Any:
     """Convert an assistant item to a trace-friendly form."""
     if isinstance(item, yuullm.Reasoning):
-        return {"type": "reasoning", "text": item.item}
+        text = item.item.get("text", "") if isinstance(item.item, dict) else str(item.item)
+        return {"type": "reasoning", "text": text}
     if isinstance(item, dict):
         return item
     return {"type": "text", "text": str(item)}
@@ -722,7 +724,7 @@ def _normalize_assistant_items(items: list[Any], *, group_tool_calls: bool = Tru
 
     def _flush_reasoning() -> None:
         if reasoning_parts:
-            normalized.append(yuullm.Reasoning(item="".join(reasoning_parts)))
+            normalized.append(yuullm.Reasoning(item={"type": "text", "text": "".join(reasoning_parts)}))
             reasoning_parts.clear()
 
     def _flush_tool_calls() -> None:
@@ -740,7 +742,7 @@ def _normalize_assistant_items(items: list[Any], *, group_tool_calls: bool = Tru
         if isinstance(item, yuullm.Reasoning):
             _flush_text()
             _flush_tool_calls()
-            reasoning_parts.append(item.item)
+            reasoning_parts.append(item.item.get("text", "") if isinstance(item.item, dict) else str(item.item))
             continue
         if isinstance(item, dict) and item.get("type") == "text":
             _flush_reasoning()
@@ -772,7 +774,7 @@ def _trace_items_for_log(reasoning_items: list[str], assistant_items: list[Any])
     """Convert runtime assistant items to stable trace payload items."""
     items: list[Any] = []
     if reasoning_items:
-        items.append(yuullm.Reasoning(item="".join(reasoning_items)))
+        items.append(yuullm.Reasoning(item={"type": "text", "text": "".join(reasoning_items)}))
     items.extend(assistant_items)
     return [_trace_item(item) for item in _normalize_assistant_items(items)]
 

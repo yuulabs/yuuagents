@@ -37,11 +37,11 @@ class FakeProvider:
     def __init__(
         self,
         script: list[list[yuullm.StreamItem]],
-        stores: list[dict] | None = None,
+        stores: list[yuullm.Store] | None = None,
     ) -> None:
         # Each call to stream() pops the next entry from the script.
         self._script = list(script)
-        self._stores = list(stores or [{} for _ in script])
+        self._stores = list(stores or [yuullm.Store() for _ in script])
         self._call_index = 0
 
     @property
@@ -61,7 +61,7 @@ class FakeProvider:
         **kwargs,
     ) -> yuullm.StreamResult:
         items = self._script[self._call_index]
-        store = dict(self._stores[self._call_index])
+        store = self._stores[self._call_index]
         self._call_index += 1
 
         async def _gen() -> AsyncIterator[yuullm.StreamItem]:
@@ -74,7 +74,7 @@ class FakeProvider:
 def make_client(
     script: list[list[yuullm.StreamItem]],
     *,
-    stores: list[dict] | None = None,
+    stores: list[yuullm.Store] | None = None,
 ) -> yuullm.YLLMClient:
     """Build a YLLMClient backed by a FakeProvider."""
     provider = FakeProvider(script, stores=stores)
@@ -237,7 +237,7 @@ async def test_session_exposes_last_and_total_usage_and_cost():
     )
     client = make_client(
         [[yuullm.Response(item={"type": "text", "text": "done"})]],
-        stores=[{"usage": usage, "cost": cost}],
+        stores=[yuullm.Store(usage=usage, cost=cost)],
     )
     manager: yt.ToolManager = yt.ToolManager()
     session = Session(
@@ -284,7 +284,7 @@ async def test_llm_usage_and_cost_are_recorded_on_conversation_span():
     )
     client = make_client(
         [[yuullm.Response(item={"type": "text", "text": "done"})]],
-        stores=[{"usage": usage, "cost": cost}],
+        stores=[yuullm.Store(usage=usage, cost=cost)],
     )
     manager: yt.ToolManager = yt.ToolManager()
     agent = make_agent(
