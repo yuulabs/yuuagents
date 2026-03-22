@@ -454,7 +454,7 @@ class AgentManager:
         return AgentInfo(
             task_id=session.task_id,
             agent_id=session.agent_id,
-            persona=session.config.persona[:80],
+            persona=session.config.system[:80],
             task=session.task,
             status=session.status.value,
             created_at=session.created_at.isoformat(),
