@@ -661,8 +661,8 @@ echo "$missing"
                 channel=channel,
                 container_id=container_id,
                 session_name=session_name,
-                docker=self,
-                timeout=timeout,
+                _docker=self,
+                _timeout=timeout,
             )
             pending.start()
             self._pending_commands[key] = pending

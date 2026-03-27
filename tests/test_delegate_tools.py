@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import Any
+
 import pytest
 import yuullm
 import yuutools as yt
@@ -17,18 +20,41 @@ from yuuagents.tools.control import (
 from yuuagents.tools.delegate import delegate
 
 
-class _FakeLLM:
+class _FakeProvider:
     def __init__(self, *replies: str) -> None:
         self._replies = list(replies)
-        self.default_model = "fake-model"
 
-    async def stream(self, history, tools=None, model=None):  # noqa: ANN001
+    @property
+    def provider(self) -> str:
+        return "fake"
+
+    @property
+    def api_type(self) -> str:
+        return "fake"
+
+    async def stream(
+        self,
+        messages: list[yuullm.Message],
+        *,
+        model: str,
+        tools: list[dict[str, Any]] | None = None,
+        on_raw_chunk: yuullm.RawChunkHook | None = None,
+        **kwargs: Any,
+    ) -> yuullm.StreamResult:
+        del messages, model, tools, on_raw_chunk, kwargs
         reply = self._replies.pop(0)
 
-        async def _iter():
+        async def _iter() -> AsyncIterator[yuullm.StreamItem]:
             yield yuullm.Response(item={"type": "text", "text": reply})
 
         return _iter(), yuullm.Store()
+
+
+def _make_llm(*replies: str) -> yuullm.YLLMClient:
+    return yuullm.YLLMClient(
+        provider=_FakeProvider(*replies),
+        default_model="fake-model",
+    )
 
 
 class _FakeManager:
@@ -43,19 +69,20 @@ class _FakeManager:
     async def start_delegate(
         self,
         *,
-        parent: object,
+        parent: Session,
         parent_run_id: str,
         agent: str,
         first_user_message: str,
         tools: list[str] | None,
         delegate_depth: int,
     ) -> Session:
+        del parent
         self.started.append((parent_run_id, first_user_message, tools, delegate_depth))
         session = Session(
             config=AgentConfig(
                 agent_id=agent,
                 tools=yt.ToolManager(),
-                llm=_FakeLLM("delegated done"),
+                llm=_make_llm("delegated done"),
                 system="delegate system",
                 max_steps=1,
             ),
@@ -73,39 +100,62 @@ class _FakeManager:
     def inspect_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
         limit: int = 200,
         max_chars: int = 4000,
     ) -> str:
+        del parent
         self.inspect_calls.append((run_id, limit))
         return f"inspect:{run_id}:{limit}:{max_chars}"
 
-    def cancel_run(self, *, parent: object, run_id: str) -> str:
+    def cancel_run(self, *, parent: Session, run_id: str) -> str:
+        del parent
         self.cancel_calls.append(run_id)
         return f"cancel:{run_id}"
 
-    def defer_run(self, *, parent: object, run_id: str, message: str) -> str:
+    def defer_run(self, *, parent: Session, run_id: str, message: str) -> str:
+        del parent
         self.defer_calls.append((run_id, message))
         return f"defer:{run_id}:{message}"
 
     async def input_run(
         self,
         *,
-        parent: object,
+        parent: Session,
         run_id: str,
         data: str,
         append_newline: bool = True,
     ) -> str:
+        del parent
         self.input_calls.append((run_id, data, append_newline))
         return f"input:{run_id}:{data}:{append_newline}"
 
-    async def wait_runs(self, *, parent: object, run_ids: list[str]) -> str:
+    async def wait_runs(self, *, parent: Session, run_ids: list[str]) -> str:
+        del parent
         self.wait_calls.append(list(run_ids))
         return f"wait:{','.join(run_ids)}"
 
 
-def _bind(tool_obj, ctx: AgentContext):
+def _make_session(manager: _FakeManager, *, agent_id: str, reply: str) -> Session:
+    return Session(
+        config=AgentConfig(
+            agent_id=agent_id,
+            tools=yt.ToolManager(),
+            llm=_make_llm(reply),
+            system=f"{agent_id} system",
+        ),
+        context=AgentContext(
+            task_id=f"{agent_id}-task",
+            agent_id=agent_id,
+            workdir="",
+            docker_container="",
+            manager=manager,
+        ),
+    )
+
+
+def _bind(tool_obj: Any, ctx: AgentContext) -> Any:
     manager = yt.ToolManager()
     manager.register(tool_obj)
     return manager[tool_obj.spec.name].bind(ctx)
@@ -114,21 +164,7 @@ def _bind(tool_obj, ctx: AgentContext):
 @pytest.mark.asyncio
 async def test_delegate_tool_starts_child_session_and_returns_last_text():
     manager = _FakeManager()
-    parent = Session(
-        config=AgentConfig(
-            agent_id="parent",
-            tools=yt.ToolManager(),
-            llm=_FakeLLM("unused"),
-            system="parent system",
-        ),
-        context=AgentContext(
-            task_id="parent-task",
-            agent_id="parent",
-            workdir="",
-            docker_container="",
-            manager=manager,
-        ),
-    )
+    parent = _make_session(manager, agent_id="parent", reply="unused")
     parent.context = parent.context.evolve(session=parent)
 
     result = await _bind(
@@ -150,7 +186,7 @@ async def test_delegate_tool_starts_child_session_and_returns_last_text():
 @pytest.mark.asyncio
 async def test_background_tools_call_manager():
     manager = _FakeManager()
-    parent = object()
+    parent = _make_session(manager, agent_id="parent", reply="unused")
 
     ctx = AgentContext(
         task_id="task",

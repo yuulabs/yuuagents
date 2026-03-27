@@ -15,13 +15,14 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 from uuid import UUID, uuid4
 
 import msgspec
 import yuullm
 import yuutrace as ytrace
 from attrs import define, field
+from yuullm.types import is_image_item, is_text_item, is_tool_call_item, is_tool_result_item
 
 from yuuagents.agent import AgentConfig
 from yuuagents.types import StepResult
@@ -93,6 +94,26 @@ def _merge_usage(total: yuullm.Usage | None, delta: yuullm.Usage) -> yuullm.Usag
     )
 
 
+def _tool_args_error(tc: yuullm.ToolCall, exc: Exception) -> ValueError:
+    return ValueError(
+        "Invalid tool arguments JSON for "
+        f"{tc.name}: {exc}. Arguments may have been truncated. "
+        "Retry with a smaller, more local edit."
+    )
+
+
+def _load_tool_kwargs(tc: yuullm.ToolCall) -> dict[str, Any]:
+    if not tc.arguments:
+        return {}
+    try:
+        kwargs = json.loads(tc.arguments)
+    except json.JSONDecodeError as exc:
+        raise _tool_args_error(tc, exc) from exc
+    if not isinstance(kwargs, dict):
+        raise _tool_args_error(tc, TypeError("decoded arguments must be a JSON object"))
+    return kwargs
+
+
 # ---------------------------------------------------------------------------
 # Agent stem events — what an Agent's flow.stem contains
 # ---------------------------------------------------------------------------
@@ -122,10 +143,10 @@ def render_agent_event(event: AgentEvent) -> str:
         case UserMessage(content=text):
             return f"[user] {text}"
         case yuullm.Reasoning(item=item):
-            text = item.get("text", "") if isinstance(item, dict) else str(item)
+            text = item["text"] if is_text_item(item) else str(item)
             return f"[thinking] {text}"
         case yuullm.Response(item=item):
-            return item.get("text", "") if item.get("type") == "text" else str(item)
+            return item["text"] if is_text_item(item) else str(item)
         case yuullm.ToolCall() as tc:
             return f"[call {tc.name}({tc.arguments or ''})]"
         case ToolResult(name=name, output=out):
@@ -517,10 +538,10 @@ class Agent(Generic[Ctx]):
     async def _exec_tool(
         self,
         tc: yuullm.ToolCall,
+        kwargs: dict[str, Any],
         child: Flow[Any, Any],
         span: ytrace.ToolSpan | None,
     ) -> str:
-        kwargs = json.loads(tc.arguments) if tc.arguments else {}
         ctx = self.ctx
         evolve = getattr(ctx, "evolve", None)
         if callable(evolve):
@@ -529,10 +550,12 @@ class Agent(Generic[Ctx]):
         try:
             result = await bound.run(**kwargs)
         except Exception as exc:
+            error_msg = f"[tool error] {type(exc).__name__}: {exc}"
             if span is not None:
-                span.fail(f"{type(exc).__name__}: {exc}")
+                span.fail(error_msg)
                 span.end()
-            raise
+            child.emit(error_msg)
+            return error_msg
         child.emit(result)
         output = str(result)
         if span is not None:
@@ -552,17 +575,34 @@ class Agent(Generic[Ctx]):
         for tc in tool_calls:
             child = self.flow.spawn("tool")
             child.info["tool_name"] = tc.name
-            kwargs = json.loads(tc.arguments) if tc.arguments else {}
             span: ytrace.ToolSpan | None = None
+            try:
+                kwargs = _load_tool_kwargs(tc)
+            except ValueError as exc:
+                error_msg = f"[tool error] {type(exc).__name__}: {exc}"
+                if tools_ctx is not None:
+                    span = tools_ctx.start_tool(
+                        name=tc.name,
+                        call_id=tc.id,
+                        input={"_parse_error": str(exc)},
+                    )
+                    span.fail(error_msg)
+                    span.end()
+                child.emit(error_msg)
+                self.flow.emit(ToolResult(call_id=tc.id, name=tc.name, output=error_msg))
+                self.messages.append(yuullm.tool(tc.id, error_msg))
+                continue
             if tools_ctx is not None:
                 span = tools_ctx.start_tool(name=tc.name, call_id=tc.id, input=kwargs)
-            child.start(self._exec_tool(tc, child, span))
+            child.start(self._exec_tool(tc, kwargs, child, span))
             task = child._task
             assert task is not None
             tasks[tc.id] = (tc, child, task, span)
 
         # wait all OR defer signal (external or per-tool self-defer)
-        pending = {t for _, _, t, _ in tasks.values()}
+        pending: set[asyncio.Task[object]] = {
+            cast(asyncio.Task[object], task) for _, _, task, _ in tasks.values()
+        }
         defer_task = asyncio.create_task(self._defer.wait())
 
         # Optional batch-level timeout
@@ -571,7 +611,7 @@ class Agent(Generic[Ctx]):
             timeout_task = asyncio.create_task(asyncio.sleep(self.config.tool_batch_timeout))
 
         # Track per-tool self-defer requests.
-        child_defer_tasks: dict[asyncio.Task[None], str] = {}
+        child_defer_tasks: dict[asyncio.Task[bool], str] = {}
         for call_id, (tc, child, task, span) in tasks.items():
             cdt = asyncio.create_task(child._defer_requested.wait())
             child_defer_tasks[cdt] = call_id
@@ -579,9 +619,12 @@ class Agent(Generic[Ctx]):
         self_deferred: set[str] = set()  # call_ids that self-deferred
 
         while pending:
-            signals = {defer_task} | set(child_defer_tasks)
+            signals: set[asyncio.Task[object]] = {
+                cast(asyncio.Task[object], defer_task)
+            }
+            signals.update(cast(asyncio.Task[object], task) for task in child_defer_tasks)
             if timeout_task is not None:
-                signals.add(timeout_task)
+                signals.add(cast(asyncio.Task[object], timeout_task))
             done, pending = await asyncio.wait(
                 pending | signals, return_when=asyncio.FIRST_COMPLETED,
             )
@@ -592,7 +635,7 @@ class Agent(Generic[Ctx]):
                 cid = child_defer_tasks.pop(cdt)
                 self_deferred.add(cid)
                 _, _, t, _ = tasks[cid]
-                pending.discard(t)
+                pending.discard(cast(asyncio.Task[object], t))
 
             if defer_task in done:
                 break
@@ -782,7 +825,20 @@ def _trace_items_for_log(reasoning_items: list[str], assistant_items: list[Any])
 def _msg_text(msg: yuullm.Message) -> str:
     """Extract display text from a yuullm.Message."""
     _, items = msg
-    return "".join(
-        item["text"] if item.get("type") == "text" else json.dumps(item, ensure_ascii=False)
-        for item in items
-    )
+    parts: list[str] = []
+    for item in items:
+        if is_text_item(item):
+            parts.append(item["text"])
+        elif is_image_item(item):
+            url = item["image_url"]["url"]
+            if url.startswith("data:"):
+                parts.append("<base64 image>")
+            else:
+                parts.append(f"<image {url}>")
+        elif is_tool_call_item(item):
+            parts.append(f"{item['name']}({item['arguments']})")
+        elif is_tool_result_item(item):
+            parts.append(f"[tool_result {item['tool_call_id']}]")
+        else:
+            parts.append(f"<{item['type']}>")
+    return "".join(parts)

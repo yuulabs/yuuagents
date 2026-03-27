@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from yuuagents.context import AgentContext
+from yuuagents.context import AgentContext, DockerExecutor
 from yuuagents.tools.file import edit_file, read_file
 
 
@@ -17,8 +17,48 @@ class StubDocker:
         self.calls.append((container_id, command, timeout))
         return self.output
 
+    async def exec_terminal(
+        self,
+        container_id: str,
+        session_id: str,
+        command: str,
+        timeout: int,
+        *,
+        soft_timeout: int | None = None,
+    ) -> str:
+        del container_id, session_id, command, timeout, soft_timeout
+        raise NotImplementedError
 
-def make_ctx(docker: StubDocker) -> AgentContext:
+    def get_pending(self, container_id: str, session_id: str) -> None:
+        del container_id, session_id
+        return None
+
+    async def resume_pending(
+        self,
+        container_id: str,
+        session_id: str,
+        timeout: int,
+    ) -> str:
+        del container_id, session_id, timeout
+        raise NotImplementedError
+
+    async def write_terminal(
+        self,
+        container_id: str,
+        session_id: str,
+        data: str,
+        *,
+        append_newline: bool = True,
+    ) -> str:
+        del container_id, session_id, data, append_newline
+        raise NotImplementedError
+
+    async def capture_terminal(self, container_id: str, session_id: str) -> str:
+        del container_id, session_id
+        raise NotImplementedError
+
+
+def make_ctx(docker: DockerExecutor) -> AgentContext:
     return AgentContext(
         task_id="task-1",
         agent_id="agent-1",
@@ -55,7 +95,7 @@ async def test_read_file_returns_text_payload() -> None:
     assert container_id == "cid"
     assert timeout == 30
     assert "start_line = 1" in command
-    assert "max_bytes = 8192" in command
+    assert "max_lines = 200" in command
 
 
 @pytest.mark.asyncio
@@ -90,17 +130,14 @@ async def test_read_file_surfaces_container_error_output() -> None:
     docker = StubDocker(
         "Traceback (most recent call last):\n"
         '  File "<stdin>", line 19, in <module>\n'
-        "RuntimeError: File slice too large to read safely: 9001 bytes > 8192 bytes "
-        "(path=/tmp/large.txt, lines=1-120, total_lines=120)\n"
+        "RuntimeError: something went wrong\n"
     )
     ctx = make_ctx(docker)
 
-    with pytest.raises(
-        RuntimeError,
-        match=r"File slice too large to read safely: 9001 bytes > 8192 bytes "
-        r"\(path=/tmp/large.txt, lines=1-120, total_lines=120\)",
-    ):
-        await read_file.bind(ctx).run(path="/tmp/large.txt")
+    result = await read_file.bind(ctx).run(path="/tmp/large.txt")
+
+    assert result.startswith("[read_file error]")
+    assert "RuntimeError: something went wrong" in result
 
 
 @pytest.mark.asyncio

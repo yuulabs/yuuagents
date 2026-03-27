@@ -15,6 +15,7 @@ import msgspec
 import yuullm
 import yuutools as yt
 from attrs import define, field
+from yuullm.types import is_text_item, is_tool_call_item
 
 from yuuagents.agent import AgentConfig
 from yuuagents.config import Config, ProviderConfig
@@ -436,13 +437,10 @@ class AgentManager:
             text_parts: list[str] = []
             tool_names: list[str] = []
             for item in items:
-                if item.get("type") == "text":
+                if is_text_item(item):
                     text_parts.append(item["text"])
-                elif (
-                    item.get("type") == "tool_call"
-                    and isinstance(item.get("name"), str)
-                ):
-                    tool_names.append(str(item["name"]))
+                elif is_tool_call_item(item):
+                    tool_names.append(item["name"])
             text = "".join(text_parts).strip()
             if text:
                 return text
@@ -492,31 +490,30 @@ class AgentManager:
         provider: yuullm.Provider
         match provider_cfg.api_type:
             case "anthropic-messages":
-                kwargs: dict[str, Any] = {
-                    "api_key": api_key,
-                    "provider_name": provider_name,
-                }
-                if provider_cfg.base_url:
-                    kwargs["base_url"] = provider_cfg.base_url
-                provider = yuullm.providers.AnthropicMessagesProvider(**kwargs)
+                provider = yuullm.providers.AnthropicMessagesProvider(
+                    api_key=api_key,
+                    base_url=provider_cfg.base_url or None,
+                    provider_name=provider_name,
+                )
             case "openai-chat-completion":
-                kwargs = {"api_key": api_key, "provider_name": provider_name}
-                if provider_cfg.base_url:
-                    kwargs["base_url"] = provider_cfg.base_url
-                if provider_cfg.organization:
-                    kwargs["organization"] = provider_cfg.organization
-                provider = yuullm.providers.OpenAIChatCompletionProvider(**kwargs)
+                provider = yuullm.providers.OpenAIChatCompletionProvider(
+                    api_key=api_key,
+                    base_url=provider_cfg.base_url or None,
+                    organization=provider_cfg.organization or None,
+                    provider_name=provider_name,
+                )
             case "openai-responses":
                 provider_cls = getattr(yuullm.providers, "OpenAIResponsesProvider", None)
                 if provider_cls is None:
                     raise RuntimeError(
                         "api_type 'openai-responses' requires yuullm.providers.OpenAIResponsesProvider"
                     )
-                kwargs = {"api_key": api_key, "provider_name": provider_name}
-                if provider_cfg.base_url:
-                    kwargs["base_url"] = provider_cfg.base_url
-                if provider_cfg.organization:
-                    kwargs["organization"] = provider_cfg.organization
+                kwargs: dict[str, Any] = {
+                    "api_key": api_key,
+                    "base_url": provider_cfg.base_url or None,
+                    "organization": provider_cfg.organization or None,
+                    "provider_name": provider_name,
+                }
                 provider = provider_cls(**kwargs)
             case _:
                 raise ValueError(f"unknown api_type {provider_cfg.api_type!r}")

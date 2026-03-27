@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 import yuutools as yt
+from yuullm.types import is_text_item
 
 from yuuagents.context import (
     DelegateDepthExceededError,
@@ -18,7 +19,7 @@ def _last_assistant_text(session: Session) -> str:
     for role, items in reversed(session.history):
         if role != "assistant":
             continue
-        text = "".join(item["text"] for item in items if item.get("type") == "text").strip()
+        text = "".join(item["text"] for item in items if is_text_item(item)).strip()
         if text:
             return text
     return ""

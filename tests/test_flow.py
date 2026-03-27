@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 
 import pytest
@@ -36,11 +36,11 @@ class FakeProvider:
 
     def __init__(
         self,
-        script: list[list[yuullm.StreamItem]],
-        stores: list[yuullm.Store] | None = None,
+        script: Sequence[Sequence[yuullm.StreamItem]],
+        stores: Sequence[yuullm.Store] | None = None,
     ) -> None:
         # Each call to stream() pops the next entry from the script.
-        self._script = list(script)
+        self._script = [list(items) for items in script]
         self._stores = list(stores or [yuullm.Store() for _ in script])
         self._call_index = 0
 
@@ -72,9 +72,9 @@ class FakeProvider:
 
 
 def make_client(
-    script: list[list[yuullm.StreamItem]],
+    script: Sequence[Sequence[yuullm.StreamItem]],
     *,
-    stores: list[yuullm.Store] | None = None,
+    stores: Sequence[yuullm.Store] | None = None,
 ) -> yuullm.YLLMClient:
     """Build a YLLMClient backed by a FakeProvider."""
     provider = FakeProvider(script, stores=stores)
@@ -303,14 +303,19 @@ async def test_llm_usage_and_cost_are_recorded_on_conversation_span():
     assert conv is not None
     spans = conv["spans"]
 
-    conversation_span = next(span for span in spans if span["name"] == "conversation")
-    event_names = [event["name"] for event in conversation_span["events"]]
+    # Turn spans are now independent child spans (not events on conversation span)
+    turn_spans = [s for s in spans if s["name"] == "turn"]
+    assert len(turn_spans) >= 1, f"expected turn spans, got: {[s['name'] for s in spans]}"
 
-    # Usage/cost events are now on the conversation span (via TurnContext.usage)
-    assert "yuu.llm.usage" in event_names
-    assert "yuu.cost" in event_names
-    # Turn events for user and assistant are also on the conversation span
-    assert "yuu.turn" in event_names
+    # Usage/cost events are on the turn span (via TurnContext.usage)
+    assistant_turns = [
+        s for s in turn_spans
+        if s["attributes"].get("yuu.turn.role") == "assistant"
+    ]
+    assert assistant_turns, "expected at least one assistant turn span"
+    assistant_events = [ev["name"] for ev in assistant_turns[0]["events"]]
+    assert "yuu.llm.usage" in assistant_events
+    assert "yuu.cost" in assistant_events
 
 
 @pytest.mark.asyncio

@@ -1151,10 +1151,11 @@ def logs(ctx: click.Context, task_id: str) -> None:
 
             click.echo(f"\n--- {role} ---")
             for item in items:
-                if item.get("type") == "text":
-                    click.echo(item["text"])
-                else:
-                    click.echo(json.dumps(item, indent=2, ensure_ascii=False))
+                match item:
+                    case {"type": "text", "text": str(text)}:
+                        click.echo(text)
+                    case _:
+                        click.echo(json.dumps(item, indent=2, ensure_ascii=False))
     except DaemonNotRunningError as e:
         click.echo(str(e), err=True)
         sys.exit(1)
