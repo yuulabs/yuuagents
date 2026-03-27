@@ -11,14 +11,25 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, TypedDict
 
 import yaml
+
+
+class SetupConfig(TypedDict):
+    provider_name: str
+    api_key_env: str
+    api_key: str
+    base_url: str
+    model: str
+    tavily_key: str
+
 
 YAGENTS_HOME = Path("~/.yagents").expanduser()
 CONFIG_PATH = YAGENTS_HOME / "config.yaml"
 
 
-def print_banner():
+def print_banner() -> None:
     """打印横幅"""
     print("=" * 60)
     print("  YAgents 入门引导")
@@ -27,7 +38,7 @@ def print_banner():
     print()
 
 
-def check_prerequisites():
+def check_prerequisites() -> None:
     """检查先决条件"""
     print("步骤 0: 检查先决条件\n")
 
@@ -35,7 +46,7 @@ def check_prerequisites():
     try:
         subprocess.run(["yagents", "--version"], capture_output=True, check=True)
         print("  ✓ yagents 已安装")
-    except FileNotFoundError, subprocess.CalledProcessError:
+    except (FileNotFoundError, subprocess.CalledProcessError):
         print("  ✗ yagents 未安装")
         print("\n请先安装: pip install -e .")
         sys.exit(1)
@@ -46,7 +57,7 @@ def check_prerequisites():
             ["docker", "--version"], capture_output=True, text=True, check=True
         )
         print(f"  ✓ Docker 已安装: {result.stdout.strip()}")
-    except FileNotFoundError, subprocess.CalledProcessError:
+    except (FileNotFoundError, subprocess.CalledProcessError):
         print("  ✗ Docker 未安装")
         print("\n请先安装: https://docs.docker.com/engine/install/")
         sys.exit(1)
@@ -54,7 +65,7 @@ def check_prerequisites():
     print()
 
 
-def configure_provider():
+def configure_provider() -> SetupConfig:
     """配置 Provider"""
     print("步骤 1: 配置 LLM Provider\n")
 
@@ -102,12 +113,12 @@ def configure_provider():
     }
 
 
-def setup_yagents(config: dict):
+def setup_yagents(config: SetupConfig) -> None:
     """运行 setup"""
     print("步骤 2: 运行 yagents setup\n")
 
     # 创建 overrides
-    overrides = {
+    overrides: dict[str, Any] = {
         "providers": {
             config["provider_name"]: {
                 "api_type": "anthropic-messages"
@@ -152,7 +163,7 @@ def setup_yagents(config: dict):
     print()
 
 
-def start_daemon():
+def start_daemon() -> subprocess.Popen[bytes]:
     """启动 daemon"""
     print("步骤 3: 启动 daemon\n")
 
@@ -179,7 +190,7 @@ def start_daemon():
     return proc
 
 
-def run_example_task(config: dict):
+def run_example_task(config: SetupConfig) -> None:
     """运行示例任务"""
     print("步骤 4: 运行示例任务\n")
 
@@ -210,7 +221,7 @@ def run_example_task(config: dict):
     print()
 
 
-def print_summary():
+def print_summary() -> None:
     """打印总结"""
     print("=" * 60)
     print("完成！")
@@ -226,7 +237,7 @@ def print_summary():
     print()
 
 
-def main():
+def main() -> None:
     print_banner()
     check_prerequisites()
     config = configure_provider()

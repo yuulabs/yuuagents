@@ -6,32 +6,59 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, TypedDict
 
 import yaml
 
-try:
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.prompt import Confirm, Prompt
-    from rich.progress import Progress, SpinnerColumn, TextColumn
-    from rich.table import Table
-    from rich import box
-except ImportError:
-    print("请先安装 rich: pip install rich")
-    sys.exit(1)
 
+class SetupConfig(TypedDict):
+    provider_key: str
+    api_type: str
+    api_key_env: str
+    api_key: str
+    base_url: str
+    model: str
+    tavily_key: str
+
+
+def _load_rich() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]:
+    try:
+        console_mod = importlib.import_module("rich.console")
+        panel_mod = importlib.import_module("rich.panel")
+        prompt_mod = importlib.import_module("rich.prompt")
+        progress_mod = importlib.import_module("rich.progress")
+        table_mod = importlib.import_module("rich.table")
+        rich_mod = importlib.import_module("rich")
+    except ImportError:
+        print("请先安装 rich: pip install rich")
+        sys.exit(1)
+    return (
+        console_mod.Console,
+        panel_mod.Panel,
+        prompt_mod.Confirm,
+        prompt_mod.Prompt,
+        progress_mod.Progress,
+        progress_mod.SpinnerColumn,
+        progress_mod.TextColumn,
+        table_mod.Table,
+        rich_mod.box,
+    )
+
+
+Console, Panel, Confirm, Prompt, Progress, SpinnerColumn, TextColumn, Table, box = _load_rich()
 console = Console()
 
 YAGENTS_HOME = Path("~/.yagents").expanduser()
 CONFIG_PATH = YAGENTS_HOME / "config.yaml"
 
 
-def print_header():
+def print_header() -> None:
     """打印欢迎标题"""
     console.print(
         Panel.fit(
@@ -43,7 +70,7 @@ def print_header():
     console.print()
 
 
-def check_prerequisites():
+def check_prerequisites() -> None:
     """检查必要的先决条件"""
     console.print("[bold]步骤 0: 检查先决条件[/bold]\n")
 
@@ -72,7 +99,7 @@ def check_prerequisites():
     console.print()
 
 
-def configure_provider():
+def configure_provider() -> SetupConfig:
     """配置 LLM Provider"""
     console.print("[bold]步骤 1: 配置 LLM Provider[/bold]\n")
 
@@ -169,7 +196,7 @@ def configure_provider():
     }
 
 
-def setup_yagents(config: dict):
+def setup_yagents(config: SetupConfig) -> None:
     """运行 yagents setup"""
     console.print("[bold]步骤 2: 运行 yagents setup[/bold]\n")
 
@@ -177,7 +204,7 @@ def setup_yagents(config: dict):
     os.environ[config["api_key_env"]] = config["api_key"]
 
     # 创建 overrides 文件
-    overrides = {
+    overrides: dict[str, Any] = {
         "providers": {
             config["provider_key"]: {
                 "api_type": config["api_type"],
@@ -243,7 +270,7 @@ def setup_yagents(config: dict):
     console.print()
 
 
-def start_daemon():
+def start_daemon() -> subprocess.Popen[bytes]:
     """启动 daemon"""
     console.print("[bold]步骤 3: 启动 yagents daemon[/bold]\n")
 
@@ -286,7 +313,7 @@ def start_daemon():
     return daemon_proc
 
 
-def run_first_task(config: dict):
+def run_first_task(config: SetupConfig) -> None:
     """运行第一个示例任务"""
     console.print("[bold]步骤 4: 运行第一个示例任务[/bold]\n")
 
@@ -379,7 +406,7 @@ def run_first_task(config: dict):
     console.print()
 
 
-def print_next_steps():
+def print_next_steps() -> None:
     """打印后续步骤"""
     console.print("[bold]完成！[/bold]\n")
 
@@ -402,7 +429,7 @@ def print_next_steps():
     )
 
 
-def main():
+def main() -> None:
     """主函数"""
     print_header()
 
