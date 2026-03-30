@@ -13,6 +13,7 @@ import shutil
 
 import click
 import yaml
+import yuullm
 
 from yuuagents.config import (
     DEFAULT_CONFIG_PATH,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from yuuagents.cli.client import YAgentsClient
 
 from yuuagents.cli.client import DaemonNotRunningError
+from yuuagents.input import agent_input_to_jsonable, conversation_input_from_text, message_to_jsonable
 
 
 _DOTENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -1063,7 +1065,7 @@ def run(
     payload: dict[str, object] = {
         "agent": agent_name,
         "persona": persona,
-        "task": task,
+        "input": agent_input_to_jsonable(conversation_input_from_text(task)),
         "model": model,
         "container": container,
         "image": image,
@@ -1097,11 +1099,12 @@ def list_agents(ctx: click.Context) -> None:
             status = a.get("status", "?")
             tid = a.get("task_id", "?")
             aid = a.get("agent_id", "?")
-            task = a.get("task", "")[:60]
+            input_kind = a.get("input_kind", "?")
+            input_preview = a.get("input_preview", "")[:60]
             steps = a.get("steps", 0)
             cost = a.get("total_cost_usd", 0)
             click.echo(
-                f"  [{status:>8}] {tid}  agent={aid}  steps={steps}  ${cost:.4f}  {task}"
+                f"  [{status:>8}] {tid}  agent={aid}  input={input_kind}  steps={steps}  ${cost:.4f}  {input_preview}"
             )
     except DaemonNotRunningError as e:
         click.echo(str(e), err=True)
@@ -1171,14 +1174,10 @@ def logs(ctx: click.Context, task_id: str) -> None:
 @click.argument("message")
 @click.pass_context
 def input(ctx: click.Context, task_id: str, message: str) -> None:
-    """Send input to a task.
-
-    If the task is still running, this queues a new mailbox message.
-    If the task is done/cancelled/error, this appends a new user message and resumes it.
-    """
+    """Send a new user message to a running task."""
     c = _client(ctx)
     try:
-        c.respond(task_id, message)
+        c.respond(task_id, message_to_jsonable(yuullm.user(message)))
         click.echo("Input sent.")
     except DaemonNotRunningError as e:
         click.echo(str(e), err=True)

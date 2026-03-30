@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
+import yuullm
 import yuutools as yt
 from yuullm.types import is_text_item
 
@@ -11,6 +12,7 @@ from yuuagents.context import (
     DelegateDepthExceededError,
     DelegateManager,
 )
+from yuuagents.input import HandoffInput
 from yuuagents.runtime_session import Session
 from yuuagents.types import AgentStatus
 
@@ -34,7 +36,7 @@ def _last_assistant_text(session: Session) -> str:
     },
     description=(
         "Delegate work to another configured agent. "
-        "Combines context and task into the delegated agent's first user message. "
+        "Builds a structured handoff input for the delegated agent. "
         "Returns the delegated agent's final text response."
     ),
 )
@@ -61,16 +63,15 @@ async def delegate(
             target_agent=agent,
         )
 
-    first_user_message = (
-        f"Context:\n{context.strip()}\n\nTask:\n{task.strip()}"
-        if context.strip()
-        else task.strip()
+    handoff_input = HandoffInput(
+        context=[yuullm.user(context.strip())] if context.strip() else [],
+        task=[yuullm.user(task.strip())] if task.strip() else [],
     )
     child = await manager.start_delegate(
         parent=parent,
         parent_run_id=parent_run_id,
         agent=agent,
-        first_user_message=first_user_message,
+        input=handoff_input,
         tools=tools,
         delegate_depth=next_depth,
     )

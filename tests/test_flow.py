@@ -12,13 +12,15 @@ import yuullm
 import yuutrace as ytrace
 import yuutools as yt
 from yuuagents.agent import AgentConfig
+from yuuagents.input import ConversationInput
 from yuuagents.types import StepResult
 from yuuagents.core.flow import (
     Agent,
     AgentState,
+    AgentInputEvent,
     Flow,
     ToolResult,
-    UserMessage,
+    InputMessage,
     _normalize_assistant_items,
     _trace_items_for_log,
     _trace_item,
@@ -116,6 +118,14 @@ async def run_session(session) -> None:
             pass
 
 
+def conversation_input(*messages: yuullm.Message) -> ConversationInput:
+    return ConversationInput(messages=list(messages))
+
+
+def user_input(text: str) -> ConversationInput:
+    return conversation_input(yuullm.user(text))
+
+
 # ---------------------------------------------------------------------------
 # Tests: Flow basics
 # ---------------------------------------------------------------------------
@@ -182,8 +192,7 @@ async def test_agent_text_response():
     manager: yt.ToolManager = yt.ToolManager()
 
     agent = make_agent(client, manager, system="You are a test agent.")
-    agent.start()
-    agent.send_first("Hi there")
+    agent.start(user_input("Hi there"))
     await run_agent(agent)
 
     # Check messages: system + user + assistant
@@ -197,7 +206,11 @@ async def test_agent_text_response():
 
     # Check stem events
     events = agent.flow.stem
-    assert any(isinstance(e, UserMessage) and e.content == "Hi there" for e in events)
+    assert any(isinstance(e, AgentInputEvent) and e.kind == "conversation" for e in events)
+    assert any(
+        isinstance(e, InputMessage) and e.role == "user" and e.content == "Hi there"
+        for e in events
+    )
     assert any(isinstance(e, yuullm.Response) for e in events)
 
 
@@ -209,8 +222,7 @@ async def test_agent_merges_streamed_text_chunks_before_persisting_history():
     manager: yt.ToolManager = yt.ToolManager()
 
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("hi")
+    agent.start(user_input("hi"))
     await run_agent(agent)
 
     assert agent.messages[-1] == ("assistant", [{"type": "text", "text": "现在 我需要回复用户。"}])
@@ -255,7 +267,7 @@ async def test_session_exposes_last_and_total_usage_and_cost():
         ),
     )
 
-    session.start("hello")
+    session.start(user_input("hello"))
     await run_session(session)
 
     assert session.last_usage == usage
@@ -295,8 +307,7 @@ async def test_llm_usage_and_cost_are_recorded_on_conversation_span():
     )
 
     store = ytrace.init_memory()
-    agent.start()
-    agent.send_first("hello")
+    agent.start(user_input("hello"))
     await run_agent(agent)
 
     conv = store.get_conversation(str(agent.conversation_id_value))
@@ -348,13 +359,13 @@ async def test_session_resume_preserves_conversation_id():
         ),
     )
 
-    session.start("hello")
+    session.start(user_input("hello"))
     await run_session(session)
     first_conversation_id = session.conversation_id
 
     resumed = Session(config=session.config, context=session.context)
     resumed.resume(
-        "followup",
+        user_input("followup"),
         history=session.history,
         conversation_id=first_conversation_id,
     )
@@ -398,12 +409,12 @@ async def test_resume_trace_records_system_and_tools():
     )
 
     first = Session(config=config, context=context)
-    first.start("hello")
+    first.start(user_input("hello"))
     await run_session(first)
 
     resumed = Session(config=config, context=context)
     resumed.resume(
-        "followup",
+        user_input("followup"),
         history=first.history,
         conversation_id=first.conversation_id,
     )
@@ -446,8 +457,7 @@ async def test_agent_tool_call():
     client = make_client(script)
 
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("What is 2 + 3?")
+    agent.start(user_input("What is 2 + 3?"))
     await run_agent(agent)
 
     # Should have: user + assistant(tool_call) + tool_result + assistant(text)
@@ -491,13 +501,12 @@ async def test_agent_mailbox_drain():
     client = make_client(script)
 
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     # Run the agent in background so we can inject messages mid-run
     wait_task = asyncio.create_task(run_agent(agent))
     await asyncio.sleep(0.02)  # let tool start
-    agent.send("ping")  # inject while tool runs
+    agent.send(yuullm.user("ping"))  # inject while tool runs
     await wait_task
 
     # The "ping" should appear in messages as a user message
@@ -532,13 +541,12 @@ async def test_background_tool_flow_waits_for_completion():
         ]
     )
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     # Run agent in background so we can send defer signal mid-run
     wait_task = asyncio.create_task(run_agent(agent))
     await asyncio.sleep(0.02)
-    agent.send("background it", defer_tools=True)
+    agent.send(yuullm.user("background it"), defer_tools=True)
     await asyncio.sleep(0.02)
 
     tool_flow = next(child for child in agent.flow.children if child.info.get("tool_name") == "hold")
@@ -575,8 +583,7 @@ async def test_agent_cancel():
     client = make_client(script)
 
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Start")
+    agent.start(user_input("Start"))
 
     # Run agent in background so we can cancel mid-run
     wait_task = asyncio.create_task(run_agent(agent))
@@ -596,7 +603,7 @@ async def test_agent_cancel():
 
 
 def test_render_agent_event():
-    assert "[user]" in render_agent_event(UserMessage("hi"))
+    assert "[user]" in render_agent_event(InputMessage(role="user", content="hi"))
     assert "[call add" in render_agent_event(
         yuullm.ToolCall(id="x", name="add", arguments='{"a":1}')
     )
@@ -721,8 +728,7 @@ async def test_steps_basic_flow():
     client = make_client(script)
 
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     results: list[StepResult] = []
     async with aclosing(agent.steps()) as gen:
@@ -759,8 +765,7 @@ async def test_steps_host_break_preserves_history():
     client = make_client(script)
 
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     async with aclosing(agent.steps()) as gen:
         async for step in gen:
@@ -797,7 +802,7 @@ async def test_steps_session_host_break_syncs():
         config=AgentConfig(agent_id="test", tools=manager, llm=client),
         context=AgentContext(task_id="t1", agent_id="test", workdir="", docker_container=""),
     )
-    session.start("Go")
+    session.start(user_input("Go"))
 
     async with aclosing(session.step_iter()) as gen:
         async for step in gen:
@@ -832,8 +837,7 @@ async def test_tool_batch_timeout():
     client = make_client(script)
 
     agent = make_agent(client, manager, tool_batch_timeout=0.05)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
     await run_agent(agent)
 
     # Check that the tool result is a background-defer message
@@ -857,8 +861,7 @@ async def test_snapshot_returns_valid_state_at_step_boundary():
     manager: yt.ToolManager = yt.ToolManager()
 
     agent = make_agent(client, manager, system="sys")
-    agent.start()
-    agent.send_first("Hi")
+    agent.start(user_input("Hi"))
     await run_agent(agent)
 
     state = await agent.snapshot()
@@ -888,12 +891,11 @@ async def test_snapshot_blocks_when_bg_tasks_pending():
         ]
     )
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     wait_task = asyncio.create_task(run_agent(agent))
     await asyncio.sleep(0.02)
-    agent.send("bg", defer_tools=True)
+    agent.send(yuullm.user("bg"), defer_tools=True)
     await asyncio.sleep(0.02)
 
     assert agent.has_pending_background
@@ -931,12 +933,11 @@ async def test_snapshot_as_interrupted_returns_immediately_with_bg():
         ]
     )
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     wait_task = asyncio.create_task(run_agent(agent))
     await asyncio.sleep(0.02)
-    agent.send("bg", defer_tools=True)
+    agent.send(yuullm.user("bg"), defer_tools=True)
     await asyncio.sleep(0.02)
 
     assert agent.has_pending_background
@@ -976,8 +977,7 @@ async def test_kill_cancels_recursively_and_preserves_stem_output():
         ]
     )
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     # Need to manually drive steps so we can kill mid-run
     async def _drive():
@@ -988,7 +988,7 @@ async def test_kill_cancels_recursively_and_preserves_stem_output():
 
     drive_task = asyncio.create_task(_drive())
     await asyncio.sleep(0.02)
-    agent.send("bg", defer_tools=True)
+    agent.send(yuullm.user("bg"), defer_tools=True)
     await asyncio.sleep(0.05)
     await drive_task
 
@@ -1018,8 +1018,7 @@ async def test_kill_then_snapshot_succeeds():
     manager: yt.ToolManager = yt.ToolManager()
 
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Hi")
+    agent.start(user_input("Hi"))
     await run_agent(agent)
 
     # kill() with no bg tasks is a no-op
@@ -1048,8 +1047,7 @@ async def test_flow_tree_pruned_between_steps():
     client = make_client(script)
 
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     step_count = 0
     async with aclosing(agent.steps()) as gen:
@@ -1084,12 +1082,11 @@ async def test_flow_tree_keeps_deferred_children():
         ]
     )
     agent = make_agent(client, manager)
-    agent.start()
-    agent.send_first("Go")
+    agent.start(user_input("Go"))
 
     wait_task = asyncio.create_task(run_agent(agent))
     await asyncio.sleep(0.02)
-    agent.send("bg", defer_tools=True)
+    agent.send(yuullm.user("bg"), defer_tools=True)
     await asyncio.sleep(0.05)
 
     # The deferred child should still be in the tree

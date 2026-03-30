@@ -22,6 +22,7 @@ from yuuagents.config import Config, ProviderConfig
 from yuuagents.context import AgentContext
 from yuuagents.core.flow import render_agent_event
 from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT, DockerManager
+from yuuagents.input import AgentInput
 from yuuagents.persistence import TaskPersistence, TaskWriter
 from yuuagents.prompts import get_vars as get_prompt_vars
 from yuuagents.runtime_session import Session
@@ -100,7 +101,7 @@ class AgentManager:
         )
         self._sessions[task_id] = session
         self._contexts[task_id] = session.context
-        self._tasks[task_id] = asyncio.create_task(self._run(session, req.task, resume=False))
+        self._tasks[task_id] = asyncio.create_task(self._run(session, req.input))
         return task_id
 
     async def start_delegate(
@@ -109,12 +110,12 @@ class AgentManager:
         parent: Session,
         parent_run_id: str,
         agent: str,
-        first_user_message: str,
+        input: AgentInput,
         tools: list[str] | None,
         delegate_depth: int,
     ) -> Session:
         task_id = uuid4().hex
-        req = TaskRequest(agent=agent, task=first_user_message, tools=tools or [])
+        req = TaskRequest(agent=agent, input=input, tools=tools or [])
         child = await self._build_child_session(
             parent=parent,
             task_id=task_id,
@@ -125,7 +126,7 @@ class AgentManager:
         self._contexts[task_id] = child.context
         self._delegate_sessions_by_run_id[parent_run_id] = child
         child.status = AgentStatus.RUNNING
-        child.start(first_user_message)
+        child.start(input)
         parent_agent = parent.agent
         child_agent = child.agent
         if (
@@ -156,6 +157,14 @@ class AgentManager:
             f"run_id: {flow.id}",
             f"kind: {flow.kind}",
         ]
+        input_kind = flow.info.get("input_kind")
+        if isinstance(input_kind, str) and input_kind:
+            lines.append(f"input_kind: {input_kind}")
+        input_fields = flow.info.get("input_fields")
+        if isinstance(input_fields, dict) and input_fields:
+            lines.append("input_fields:")
+            for name, text in input_fields.items():
+                lines.append(f"{name}: {text}")
         tool_name = flow.info.get("tool_name")
         if isinstance(tool_name, str) and tool_name:
             lines.append(f"tool_name: {tool_name}")
@@ -163,6 +172,8 @@ class AgentManager:
         if delegate is not None:
             lines.append(f"delegate_task_id: {delegate.task_id}")
             lines.append(f"delegate_status: {delegate.status.value}")
+            lines.append(f"delegate_input_kind: {delegate.input_kind}")
+            lines.append(f"delegate_input_preview: {delegate.input_preview}")
             delegate_agent = delegate.agent
             if delegate_agent is not None:
                 lines.append("delegate_stem:")
@@ -204,7 +215,7 @@ class AgentManager:
             message.strip()
             or "请立即停止等待中的前台工具，把当前工作移到后台，并先汇报简短进展。"
         )
-        delegate.send(prompt, defer_tools=True)
+        delegate.send(yuullm.user(prompt), defer_tools=True)
         return f"Sent defer signal to delegated run {run_id}"
 
     async def input_run(
@@ -217,7 +228,7 @@ class AgentManager:
     ) -> str:
         delegate = self._delegate_sessions_by_run_id.get(run_id)
         if delegate is not None:
-            delegate.send(data, defer_tools=False)
+            delegate.send(yuullm.user(data), defer_tools=False)
             return f"Input sent to delegated run {run_id}"
         agent = parent.agent
         if agent is None:
@@ -269,9 +280,9 @@ class AgentManager:
         ids = ", ".join(run_ids)
         return f"Wait finished for runs: {ids}"
 
-    async def _run(self, session: Session, task: str, *, resume: bool) -> None:
+    async def _run(self, session: Session, agent_input: AgentInput) -> None:
         session.status = AgentStatus.RUNNING
-        session.start(task)
+        session.start(agent_input)
         try:
             async for _step in session.step_iter():
                 if not session.has_pending_background:
@@ -319,7 +330,8 @@ class AgentManager:
             task_id=row.task_id,
             agent_id=row.agent_id,
             persona=row.persona[:80],
-            task=row.task,
+            input_kind=row.input_kind,
+            input_preview=row.input_preview,
             status=row.status,
             created_at=row.created_at.isoformat(),
             last_assistant_message="",
@@ -340,11 +352,11 @@ class AgentManager:
             raise KeyError(task_id)
         return await self._persistence.load_history(task_id)
 
-    async def respond(self, task_id: str, content: str) -> None:
+    async def respond(self, task_id: str, message: yuullm.Message) -> None:
         session = self._sessions.get(task_id)
         if session is None:
             raise KeyError(task_id)
-        session.send(content)
+        session.send(message)
 
     async def cancel(self, task_id: str) -> None:
         if task_id not in self._sessions:
@@ -453,7 +465,8 @@ class AgentManager:
             task_id=session.task_id,
             agent_id=session.agent_id,
             persona=session.config.system[:80],
-            task=session.task,
+            input_kind=session.input_kind,
+            input_preview=session.input_preview,
             status=session.status.value,
             created_at=session.created_at.isoformat(),
             last_assistant_message=self._last_assistant_message(session),
@@ -635,7 +648,12 @@ class AgentManager:
             docker=self.docker,
             tavily_api_key=tavily_api_key or os.environ.get(self.config.tavily.api_key_env, ""),
         )
-        session = Session(config=config, context=ctx, mailbox_id=task_id)
+        session = Session(
+            config=config,
+            context=ctx,
+            input=req.input,
+            mailbox_id=task_id,
+        )
         return session
 
     async def _build_root_session(
@@ -653,7 +671,7 @@ class AgentManager:
                 task_id=task_id,
                 agent_id=req.agent,
                 persona=session.config.system[:200],
-                task=req.task,
+                input=req.input,
                 system_prompt=session.config.system,
                 model=session.config.llm.default_model,
                 tools=req.tools or self._default_tools(req.agent),

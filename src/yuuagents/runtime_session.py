@@ -14,6 +14,7 @@ from attrs import define, field
 from yuuagents.agent import AgentConfig
 from yuuagents.context import AgentContext
 from yuuagents.core.flow import AgentState, Agent as FlowAgent
+from yuuagents.input import AgentInput, agent_input_preview
 from yuuagents.types import AgentStatus, ErrorInfo, StepResult
 
 if TYPE_CHECKING:
@@ -26,7 +27,7 @@ class Session:
 
     config: AgentConfig
     context: AgentContext
-    task: str = ""
+    input: AgentInput | None = None
     history: list[yuullm.Message] = field(factory=list)
     status: AgentStatus = AgentStatus.IDLE
     error: ErrorInfo | None = None
@@ -88,12 +89,25 @@ class Session:
     def task_id(self) -> str:
         return self.context.task_id
 
+    @property
+    def input_kind(self) -> str:
+        if self.input is None:
+            return ""
+        return self.input.kind
+
+    @property
+    def input_preview(self) -> str:
+        if self.input is None:
+            return ""
+        return agent_input_preview(self.input)
+
     def _make_agent(
         self,
         *,
         system: str | None = None,
         conversation_id: UUID | None = None,
         initial_messages: list[yuullm.Message] | None = None,
+        startup_input: AgentInput | None = None,
     ) -> FlowAgent[AgentContext]:
         cfg = self.config if system is None else attrs.evolve(self.config, system=system)
         return FlowAgent(
@@ -101,22 +115,22 @@ class Session:
             ctx=self.context,
             conversation_id=conversation_id,
             initial_messages=initial_messages or [],
+            startup_input=startup_input,
         )
 
-    def start(self, task: str) -> None:
-        """Create the underlying FlowAgent and queue the task. Does not launch a background task."""
-        self.task = task
+    def start(self, agent_input: AgentInput) -> None:
+        """Create the underlying FlowAgent for the given startup input."""
+        self.input = agent_input
         self.context = self.context.evolve(session=self)
-        agent = self._make_agent()
-        agent.start()
-        agent.send_first(task)
+        agent = self._make_agent(startup_input=agent_input)
+        agent.start(agent_input)
         self.agent = agent
 
-    def send(self, content: str, *, defer_tools: bool = False) -> None:
+    def send(self, message: yuullm.Message, *, defer_tools: bool = False) -> None:
         """Forward a message to the running agent."""
         if self.agent is None:
             raise RuntimeError("session not started")
-        self.agent.send(content, defer_tools=defer_tools)
+        self.agent.send(message, defer_tools=defer_tools)
 
     def cancel(self) -> None:
         """Cancel the running agent flow."""
@@ -125,22 +139,22 @@ class Session:
 
     def resume(
         self,
-        task: str,
+        agent_input: AgentInput,
         *,
         history: list[yuullm.Message],
         conversation_id: UUID | None = None,
         system: str | None = None,
     ) -> None:
-        """Resume from prior history: pre-fill messages, then queue a new task."""
-        self.task = task
+        """Resume from prior history with a new structured startup input."""
+        self.input = agent_input
         self.context = self.context.evolve(session=self)
         agent = self._make_agent(
             system=system,
             conversation_id=conversation_id,
             initial_messages=list(history),
+            startup_input=agent_input,
         )
-        agent.start()
-        agent.send_first(task)
+        agent.start(agent_input)
         self.agent = agent
 
     @property

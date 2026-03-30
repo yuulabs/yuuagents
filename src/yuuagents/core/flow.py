@@ -22,9 +22,15 @@ import msgspec
 import yuullm
 import yuutrace as ytrace
 from attrs import define, field
-from yuullm.types import is_image_item, is_text_item, is_tool_call_item, is_tool_result_item
+from yuullm.types import is_text_item
 
 from yuuagents.agent import AgentConfig
+from yuuagents.input import (
+    AgentInput,
+    agent_input_field_previews,
+    flatten_input_messages,
+    render_message_text,
+)
 from yuuagents.types import StepResult
 
 S = TypeVar("S")
@@ -118,7 +124,13 @@ def _load_tool_kwargs(tc: yuullm.ToolCall) -> dict[str, Any]:
 # Agent stem events — what an Agent's flow.stem contains
 # ---------------------------------------------------------------------------
 
-class UserMessage(msgspec.Struct, frozen=True):
+class AgentInputEvent(msgspec.Struct, frozen=True):
+    kind: str
+    fields: dict[str, str]
+
+
+class InputMessage(msgspec.Struct, frozen=True):
+    role: str
     content: str
 
 
@@ -129,7 +141,8 @@ class ToolResult(msgspec.Struct, frozen=True):
 
 
 AgentEvent = (
-    UserMessage
+    AgentInputEvent
+    | InputMessage
     | yuullm.Reasoning
     | yuullm.Response
     | yuullm.ToolCall
@@ -140,8 +153,11 @@ AgentEvent = (
 def render_agent_event(event: AgentEvent) -> str:
     """Render an agent stem event to human-readable text."""
     match event:
-        case UserMessage(content=text):
-            return f"[user] {text}"
+        case AgentInputEvent(kind=kind, fields=fields):
+            field_text = ", ".join(f"{name}={text}" for name, text in fields.items() if text)
+            return f"[input {kind}] {field_text}".rstrip()
+        case InputMessage(role=role, content=text):
+            return f"[{role}] {text}"
         case yuullm.Reasoning(item=item):
             text = item["text"] if is_text_item(item) else str(item)
             return f"[thinking] {text}"
@@ -262,6 +278,7 @@ class Agent(Generic[Ctx]):
     ctx: Ctx
     conversation_id: UUID | None = None
     initial_messages: list[yuullm.Message] = field(factory=list)
+    startup_input: AgentInput | None = None
 
     flow: Flow[AgentEvent, yuullm.Message] = field(init=False)
     messages: list[yuullm.Message] = field(factory=list, init=False)
@@ -275,17 +292,17 @@ class Agent(Generic[Ctx]):
     _chat: ytrace.ConversationContext | None = field(default=None, init=False)
     _bg_tasks: dict[str, _BgTaskInfo] = field(factory=dict, init=False)
 
-    def start(self) -> None:
-        """Create the flow. Does NOT launch a background task."""
+    def start(self, startup_input: AgentInput | None = None) -> None:
+        """Create the flow and register the structured startup input."""
         self.flow = Flow(kind="agent")
+        if startup_input is not None:
+            self.startup_input = startup_input
+        if self.startup_input is None:
+            raise RuntimeError("structured startup input is required")
+        self.flow.info["input_kind"] = self.startup_input.kind
+        self.flow.info["input_fields"] = agent_input_field_previews(self.startup_input)
 
-    def send_first(self, task: str) -> None:
-        """Queue the first user message. Must be called before steps()."""
-        self.flow.send(yuullm.user(task))
-
-    def send(self, msg: yuullm.Message | str, *, defer_tools: bool = False) -> None:
-        if isinstance(msg, str):
-            msg = yuullm.user(msg)
+    def send(self, msg: yuullm.Message, *, defer_tools: bool = False) -> None:
         self.flow.send(msg)
         if defer_tools:
             self._defer.set()
@@ -395,9 +412,15 @@ class Agent(Generic[Ctx]):
         elif self.config.system:
             self.messages.append(yuullm.system(self.config.system))
 
-        first: yuullm.Message = await self.flow.mailbox.get()
-        self.flow.emit(UserMessage(_msg_text(first)))
-        self.messages.append(first)
+        if self.startup_input is None:
+            raise RuntimeError("structured startup input is required")
+        startup_messages = flatten_input_messages(self.startup_input)
+        self.flow.emit(
+            AgentInputEvent(
+                kind=self.startup_input.kind,
+                fields=agent_input_field_previews(self.startup_input),
+            )
+        )
 
         if ytrace.is_initialized():
             chat = ytrace.start_conversation(
@@ -408,8 +431,7 @@ class Agent(Generic[Ctx]):
             self._chat = chat
             if self.config.system:
                 chat.system(self.config.system, tools=self.config.tools.specs() or None)
-            _, first_items = first
-            chat.user(*first_items)
+            self._accept_messages(startup_messages)
             error: Exception | None = None
             try:
                 async for step in self._step_loop():
@@ -421,6 +443,7 @@ class Agent(Generic[Ctx]):
                 self._chat = None
                 chat.end(error)
         else:
+            self._accept_messages(startup_messages)
             async for step in self._step_loop():
                 yield step
 
@@ -723,17 +746,25 @@ class Agent(Generic[Ctx]):
         self.flow.send(yuullm.user(text))
         self._bg_tasks.pop(call_id, None)
 
+    def _accept_messages(self, messages: list[yuullm.Message]) -> None:
+        for message in messages:
+            self._accept_message(message)
+
+    def _accept_message(self, message: yuullm.Message) -> None:
+        role, items = message
+        self.flow.emit(InputMessage(role=role, content=_msg_text(message)))
+        self.messages.append(message)
+        if self._chat is not None:
+            turn = self._chat.start_turn(role)
+            turn.add(*items)
+            turn.end()
+
     def _drain_mailbox(self) -> bool:
         """Drain pending messages from the mailbox. Returns True if any were drained."""
         drained = False
         while not self.flow.mailbox.empty():
             msg: yuullm.Message = self.flow.mailbox.get_nowait()
-            text = _msg_text(msg)
-            self.flow.emit(UserMessage(text))
-            self.messages.append(msg)
-            if self._chat is not None:
-                _, msg_items = msg
-                self._chat.user(*msg_items)
+            self._accept_message(msg)
             drained = True
         return drained
 
@@ -824,21 +855,4 @@ def _trace_items_for_log(reasoning_items: list[str], assistant_items: list[Any])
 
 def _msg_text(msg: yuullm.Message) -> str:
     """Extract display text from a yuullm.Message."""
-    _, items = msg
-    parts: list[str] = []
-    for item in items:
-        if is_text_item(item):
-            parts.append(item["text"])
-        elif is_image_item(item):
-            url = item["image_url"]["url"]
-            if url.startswith("data:"):
-                parts.append("<base64 image>")
-            else:
-                parts.append(f"<image {url}>")
-        elif is_tool_call_item(item):
-            parts.append(f"{item['name']}({item['arguments']})")
-        elif is_tool_result_item(item):
-            parts.append(f"[tool_result {item['tool_call_id']}]")
-        else:
-            parts.append(f"<{item['type']}>")
-    return "".join(parts)
+    return render_message_text(msg)

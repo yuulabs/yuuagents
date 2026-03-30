@@ -12,10 +12,10 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from yuuagents.daemon.manager import AgentManager
+from yuuagents.input import message_from_jsonable
 from yuuagents.types import TaskRequest
 
 _encoder = msgspec.json.Encoder()
-_task_decoder = msgspec.json.Decoder(TaskRequest)
 
 
 def _json(obj: Any, status: int = 200) -> Response:
@@ -57,8 +57,10 @@ def create_app(
     async def create_agent(request: Request) -> Response:
         body = await request.body()
         try:
-            req = _task_decoder.decode(body)
+            req = TaskRequest.from_jsonable(msgspec.json.decode(body))
         except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+            return _json({"error": str(exc)}, status=400)
+        except (TypeError, ValueError) as exc:
             return _json({"error": str(exc)}, status=400)
 
         try:
@@ -91,9 +93,14 @@ def create_app(
     async def post_input(request: Request) -> Response:
         task_id = request.path_params["task_id"]
         body = await request.json()
-        content = body.get("content", "")
+        if not isinstance(body, dict):
+            return _json({"error": "request body must be an object"}, status=400)
         try:
-            await manager.respond(task_id, content)
+            message = message_from_jsonable(body.get("message"))
+        except (TypeError, ValueError) as exc:
+            return _json({"error": str(exc)}, status=400)
+        try:
+            await manager.respond(task_id, message)
         except KeyError:
             return _json({"error": "not found"}, status=404)
         return _json({"ok": True})

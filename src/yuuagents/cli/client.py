@@ -73,11 +73,11 @@ class YAgentsClient:
         resp.raise_for_status()
         return resp.json()
 
-    def respond(self, task_id: str, content: str) -> dict[str, Any]:
+    def respond(self, task_id: str, message: list[Any]) -> dict[str, Any]:
         resp = self._request(
             "POST",
             f"/api/agents/{task_id}/input",
-            json={"content": content},
+            json={"message": message},
         )
         resp.raise_for_status()
         return resp.json()

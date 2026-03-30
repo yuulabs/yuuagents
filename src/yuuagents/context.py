@@ -8,6 +8,7 @@ from attrs import define, evolve
 
 if TYPE_CHECKING:
     from yuuagents.core.flow import Flow
+    from yuuagents.input import AgentInput
     from yuuagents.runtime_session import Session
 
 
@@ -55,7 +56,7 @@ class DelegateManager(Protocol):
         parent: Session,
         parent_run_id: str,
         agent: str,
-        first_user_message: str,
+        input: AgentInput,
         tools: list[str] | None,
         delegate_depth: int,
     ) -> Session: ...

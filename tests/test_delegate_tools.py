@@ -9,6 +9,7 @@ import yuutools as yt
 
 from yuuagents.agent import AgentConfig
 from yuuagents.context import AgentContext
+from yuuagents.input import AgentInput, HandoffInput
 from yuuagents.runtime_session import Session
 from yuuagents.tools.control import (
     cancel_background,
@@ -59,7 +60,7 @@ def _make_llm(*replies: str) -> yuullm.YLLMClient:
 
 class _FakeManager:
     def __init__(self) -> None:
-        self.started: list[tuple[str, str, list[str] | None, int]] = []
+        self.started: list[tuple[str, AgentInput, list[str] | None, int]] = []
         self.inspect_calls: list[tuple[str, int]] = []
         self.cancel_calls: list[str] = []
         self.defer_calls: list[tuple[str, str]] = []
@@ -72,12 +73,12 @@ class _FakeManager:
         parent: Session,
         parent_run_id: str,
         agent: str,
-        first_user_message: str,
+        input: AgentInput,
         tools: list[str] | None,
         delegate_depth: int,
     ) -> Session:
         del parent
-        self.started.append((parent_run_id, first_user_message, tools, delegate_depth))
+        self.started.append((parent_run_id, input, tools, delegate_depth))
         session = Session(
             config=AgentConfig(
                 agent_id=agent,
@@ -94,7 +95,7 @@ class _FakeManager:
                 manager=self,
             ),
         )
-        session.start(first_user_message)
+        session.start(input)
         return session
 
     def inspect_run(
@@ -179,7 +180,15 @@ async def test_delegate_tool_starts_child_session_and_returns_last_text():
 
     assert result == "delegated done"
     assert manager.started == [
-        ("run-123", "Context:\nrepo=demo\n\nTask:\nfix bug", ["read_file"], 1)
+        (
+            "run-123",
+            HandoffInput(
+                context=[yuullm.user("repo=demo")],
+                task=[yuullm.user("fix bug")],
+            ),
+            ["read_file"],
+            1,
+        )
     ]
 
 

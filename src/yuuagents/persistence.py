@@ -1,14 +1,12 @@
-"""Task persistence — append-only checkpoints + deterministic replay."""
+"""Task persistence — snapshot-based checkpoints with structured startup input."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 import msgspec
-import yuullm
 from attrs import define, field
 from sqlalchemy import (
     DateTime,
@@ -29,42 +27,18 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from yuuagents.input import (
+    AgentInput,
+    agent_input_from_jsonable,
+    agent_input_preview,
+    agent_input_to_jsonable,
+    message_from_jsonable,
+)
 from yuuagents.types import AgentInfo, AgentStatus, ErrorInfo
 
-Phase = Literal["llm", "tool", "snapshot"]
+Phase = Literal["snapshot"]
 
 _json_encoder = msgspec.json.Encoder()
-
-
-class ToolCallDTO(msgspec.Struct, frozen=True, kw_only=True):
-    call_id: str
-    name: str
-    args_json: str
-
-
-class LlmCheckpointPayload(msgspec.Struct, frozen=True, kw_only=True):
-    history_append: Any | None = None
-    tool_calls: list[ToolCallDTO] = msgspec.field(default_factory=list)
-    status_after: str = ""
-
-
-class ToolErrorDTO(msgspec.Struct, frozen=True, kw_only=True):
-    type: str
-    message: str
-    interrupted: bool = False
-    cancelled: bool = False
-
-
-class ToolResultDTO(msgspec.Struct, frozen=True, kw_only=True):
-    call_id: str
-    ok: bool
-    output_text: str = ""
-    error: ToolErrorDTO | None = None
-
-
-class ToolCheckpointPayload(msgspec.Struct, frozen=True, kw_only=True):
-    results: list[ToolResultDTO] = msgspec.field(default_factory=list)
-    status_after: str = ""
 
 
 class _Base(DeclarativeBase):
@@ -77,7 +51,9 @@ class TaskRow(_Base):
     task_id: Mapped[str] = mapped_column(String, primary_key=True)
     agent_id: Mapped[str] = mapped_column(String, nullable=False)
     persona: Mapped[str] = mapped_column(Text, nullable=False)
-    task: Mapped[str] = mapped_column(Text, nullable=False)
+    input_kind: Mapped[str] = mapped_column(String, nullable=False)
+    input_preview: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    input_json: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     model: Mapped[str] = mapped_column(String, nullable=False, default="")
     tools_json: Mapped[bytes] = mapped_column(
@@ -118,7 +94,7 @@ class RestoredTask:
     task_id: str
     agent_id: str
     persona: str
-    task: str
+    input: AgentInput
     system_prompt: str
     model: str
     tools: list[str]
@@ -159,7 +135,7 @@ class TaskPersistence:
         task_id: str,
         agent_id: str,
         persona: str,
-        task: str,
+        input: AgentInput,
         system_prompt: str,
         model: str,
         tools: list[str],
@@ -171,7 +147,9 @@ class TaskPersistence:
             task_id=task_id,
             agent_id=agent_id,
             persona=persona,
-            task=task,
+            input_kind=input.kind,
+            input_preview=agent_input_preview(input, max_chars=400),
+            input_json=_json_encoder.encode(agent_input_to_jsonable(input)),
             system_prompt=system_prompt,
             model=model,
             tools_json=_json_encoder.encode(tools),
@@ -224,7 +202,8 @@ class TaskPersistence:
                     task_id=r.task_id,
                     agent_id=r.agent_id,
                     persona=r.persona[:80],
-                    task=r.task,
+                    input_kind=r.input_kind,
+                    input_preview=r.input_preview,
                     status=r.status,
                     created_at=r.created_at.isoformat(),
                     last_assistant_message="",
@@ -248,76 +227,27 @@ class TaskPersistence:
         if row is None:
             raise KeyError(task_id)
 
-        history: list[Any] = [yuullm.user(row.task)]
-
         async with self._session()() as session:
-            cps = (
-                (
-                    await session.execute(
-                        select(TaskCheckpointRow)
-                        .where(TaskCheckpointRow.task_id == task_id)
-                        .order_by(
-                            TaskCheckpointRow.turn.asc(), TaskCheckpointRow.phase.asc()
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-
-        for cp in cps:
-            if cp.phase == "llm":
-                llm_payload = msgspec.json.decode(cp.payload, type=LlmCheckpointPayload)
-                if llm_payload.history_append is not None:
-                    history.append(llm_payload.history_append)
-                continue
-
-            tool_payload = msgspec.json.decode(cp.payload, type=ToolCheckpointPayload)
-            for r in tool_payload.results:
-                if r.ok:
-                    content = r.output_text
-                elif r.error is not None:
-                    content = r.error.message
-                else:
-                    content = ""
-                history.append(yuullm.tool(r.call_id, content))
-
-        return history
-
-    async def pending_input_prompt(self, task_id: str) -> str | None:
-        row = await self.get_task_row(task_id)
-        if row is None:
-            raise KeyError(task_id)
-        if row.status != AgentStatus.BLOCKED_ON_INPUT.value:
-            return None
-        if row.head_turn <= 0:
-            return None
-
-        turn = row.head_turn
-        async with self._session()() as session:
-            llm_cp = (
+            snapshot = (
                 await session.execute(
                     select(TaskCheckpointRow)
                     .where(
                         (TaskCheckpointRow.task_id == task_id)
-                        & (TaskCheckpointRow.turn == turn)
-                        & (TaskCheckpointRow.phase == "llm")
+                        & (TaskCheckpointRow.phase == "snapshot")
                     )
+                    .order_by(TaskCheckpointRow.turn.desc())
                     .limit(1)
                 )
             ).scalar_one_or_none()
-
-        if llm_cp is None:
-            return None
-
-        llm_payload = msgspec.json.decode(llm_cp.payload, type=LlmCheckpointPayload)
-        for c in llm_payload.tool_calls:
-            if c.name != "user_input":
-                continue
-            args = json.loads(c.args_json) if c.args_json else {}
-            prompt = str(args.get("prompt", "")).strip()
-            return prompt or None
-        return None
+        if snapshot is None:
+            return []
+        payload = msgspec.json.decode(snapshot.payload)
+        if not isinstance(payload, dict):
+            return []
+        raw_messages = payload.get("messages", [])
+        if not isinstance(raw_messages, list):
+            return []
+        return [message_from_jsonable(message) for message in raw_messages]
 
     async def load_unfinished(self) -> list[RestoredTask]:
         async with self._session()() as session:
@@ -347,7 +277,7 @@ class TaskPersistence:
                     task_id=r.task_id,
                     agent_id=r.agent_id,
                     persona=r.persona,
-                    task=r.task,
+                    input=agent_input_from_jsonable(msgspec.json.decode(r.input_json)),
                     system_prompt=r.system_prompt,
                     model=r.model,
                     tools=tools,
@@ -359,97 +289,6 @@ class TaskPersistence:
                 )
             )
         return restored
-
-    async def recover_pending_tools(self, task_id: str) -> bool:
-        row = await self.get_task_row(task_id)
-        if row is None:
-            raise KeyError(task_id)
-        if row.status not in (
-            AgentStatus.RUNNING.value,
-            AgentStatus.BLOCKED_ON_INPUT.value,
-        ):
-            return False
-        if row.head_turn <= 0:
-            return False
-
-        turn = row.head_turn
-        async with self._session()() as session:
-            cps = (
-                (
-                    await session.execute(
-                        select(TaskCheckpointRow).where(
-                            (TaskCheckpointRow.task_id == task_id)
-                            & (TaskCheckpointRow.turn == turn)
-                        )
-                    )
-                )
-                .scalars()
-                .all()
-            )
-
-        llm_cp = next((c for c in cps if c.phase == "llm"), None)
-        tool_cp = next((c for c in cps if c.phase == "tool"), None)
-        if llm_cp is None:
-            return False
-
-        llm_payload = msgspec.json.decode(llm_cp.payload, type=LlmCheckpointPayload)
-        if not llm_payload.tool_calls:
-            return False
-
-        requested = {c.call_id for c in llm_payload.tool_calls}
-        done: set[str] = set()
-        if tool_cp is not None:
-            tool_payload = msgspec.json.decode(
-                tool_cp.payload, type=ToolCheckpointPayload
-            )
-            done = {r.call_id for r in tool_payload.results}
-
-        pending = sorted(requested - done)
-        if not pending:
-            return False
-
-        payload = ToolCheckpointPayload(
-            results=[
-                ToolResultDTO(
-                    call_id=cid,
-                    ok=False,
-                    error=ToolErrorDTO(
-                        type="interrupted",
-                        message="interrupted",
-                        interrupted=True,
-                    ),
-                )
-                for cid in pending
-            ],
-            status_after=AgentStatus.RUNNING.value,
-        )
-        now = datetime.now(timezone.utc)
-        insert_cp = sqlite_insert(TaskCheckpointRow).values(
-            task_id=task_id,
-            turn=turn,
-            phase="tool",
-            ts=now,
-            payload=msgspec.json.encode(payload),
-        )
-        insert_cp = insert_cp.on_conflict_do_nothing(
-            index_elements=[
-                TaskCheckpointRow.task_id,
-                TaskCheckpointRow.turn,
-                TaskCheckpointRow.phase,
-            ]
-        )
-
-        async with self._session()() as session:
-            async with session.begin():
-                res: Any = await session.execute(insert_cp)
-                if res.rowcount and res.rowcount > 0:  # type:ignore
-                    await session.execute(
-                        update(TaskRow)
-                        .where(TaskRow.task_id == task_id)
-                        .values(status=AgentStatus.RUNNING.value, updated_at=now)
-                    )
-                    return True
-        return False
 
 
 @define(frozen=True)
@@ -568,73 +407,3 @@ class TaskWriter:
             elapsed = asyncio.get_running_loop().time() - last_flush
             if len(buffer) >= 200 or bytes_total >= 1024 * 1024 or elapsed >= 0.3:
                 await _flush()
-
-
-@define(frozen=True)
-class TaskRecorder:
-    task_id: str
-    writer: TaskWriter
-
-    async def record_llm(
-        self,
-        *,
-        turn: int,
-        history_append: Any | None,
-        tool_calls: list[ToolCallDTO],
-    ) -> None:
-        status_after = AgentStatus.RUNNING if tool_calls else AgentStatus.DONE
-        payload = LlmCheckpointPayload(
-            history_append=history_append,
-            tool_calls=tool_calls,
-            status_after=status_after.value,
-        )
-        cp = _BufferedCheckpoint(
-            task_id=self.task_id,
-            turn=turn,
-            phase="llm",
-            ts=datetime.now(timezone.utc),
-            payload=msgspec.json.encode(payload),
-            status_after=status_after,
-        )
-        await self.writer.append_checkpoint(cp)
-
-    async def record_user(
-        self,
-        *,
-        turn: int,
-        message: Any,
-    ) -> None:
-        payload = LlmCheckpointPayload(
-            history_append=message,
-            tool_calls=[],
-            status_after=AgentStatus.RUNNING.value,
-        )
-        cp = _BufferedCheckpoint(
-            task_id=self.task_id,
-            turn=turn,
-            phase="llm",
-            ts=datetime.now(timezone.utc),
-            payload=msgspec.json.encode(payload),
-            status_after=AgentStatus.RUNNING,
-        )
-        await self.writer.append_checkpoint(cp)
-
-    async def record_tool(
-        self,
-        *,
-        turn: int,
-        results: list[ToolResultDTO],
-    ) -> None:
-        payload = ToolCheckpointPayload(
-            results=results,
-            status_after=AgentStatus.RUNNING.value,
-        )
-        cp = _BufferedCheckpoint(
-            task_id=self.task_id,
-            turn=turn,
-            phase="tool",
-            ts=datetime.now(timezone.utc),
-            payload=msgspec.json.encode(payload),
-            status_after=AgentStatus.RUNNING,
-        )
-        await self.writer.append_checkpoint(cp)
