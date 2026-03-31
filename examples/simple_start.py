@@ -135,7 +135,6 @@ def setup_yagents(config: SetupConfig) -> None:
                 "model": config["model"],
                 "persona": "You are a helpful assistant.",
                 "tools": ["execute_bash", "read_file", "write_file", "web_search"],
-                "skills": ["*"],
             }
         },
     }

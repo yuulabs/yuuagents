@@ -35,12 +35,6 @@
 # docker:
 #   image: my-dev-image:latest
 
-# Example: add extra skill directories
-# skills:
-#   paths:
-#     - ~/.yagents/skills
-#     - ~/my-project/.skills
-
 # Example: define a custom agent
 # agents:
 #   devops:

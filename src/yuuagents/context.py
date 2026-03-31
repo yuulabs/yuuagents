@@ -134,7 +134,6 @@ class AgentContext:
     docker: DockerExecutor | None = None
     tavily_api_key: str = ""
     subprocess_env: dict | None = None
-    addon_context: object | None = None  # yuubot AddonContext, opaque to yuuagents
     session: Session | None = None
     current_run_id: str = ""
     current_flow: Flow | None = None

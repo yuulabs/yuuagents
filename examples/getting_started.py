@@ -225,7 +225,6 @@ def setup_yagents(config: SetupConfig) -> None:
                     "delete_file",
                     "web_search",
                 ],
-                "skills": ["*"],
             }
         },
     }

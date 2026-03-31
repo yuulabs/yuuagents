@@ -33,8 +33,6 @@ dependencies = [
     # Persistence (async ORM)
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.21.0",
-    # Agent Skills (standard library)
-    "skills-ref>=0.1.0",
 ]
 
 [project.scripts]
@@ -58,10 +56,6 @@ examples = [
 
 [tool.mypy]
 python_version = "3.14"
-
-[[tool.mypy.overrides]]
-module = "skills_ref.*"
-ignore_missing_imports = true
 
 [tool.uv.sources]
 yuullm = { workspace = true }

@@ -52,14 +52,6 @@ docker:
   # and /usr/local/bin/yagents-apply-patch). `yagents install` will build it.
   image: yuuagents-runtime:latest
 
-# -- Agent Skills -------------------------------------------------------------
-
-skills:
-  # Directories scanned for SKILL.md files (Agent Skills standard).
-  # Supports ~ expansion.
-  paths:
-    - ~/.yagents/skills
-
 # -- Web Search (Tavily) -----------------------------------------------------
 
 tavily:
@@ -108,9 +100,6 @@ agents:
       - edit_file
       - delete_file
       - web_search
-    skills:
-      - "*"                          # "*" = inject all discovered skills
-
   researcher:
     description: >
       A research assistant who searches the web and writes clear reports.
