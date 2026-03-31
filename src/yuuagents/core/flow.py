@@ -18,6 +18,7 @@ from collections.abc import AsyncGenerator, Callable, Coroutine
 from typing import Any, Generic, TypeVar
 from uuid import UUID, uuid4
 
+import attrs
 import msgspec
 import yuullm
 import yuutrace as ytrace
@@ -25,6 +26,7 @@ from attrs import define, field
 from yuullm.types import is_text_item
 
 from yuuagents.agent import AgentConfig
+from yuuagents.context import AgentContext
 from yuuagents.input import (
     AgentInput,
     agent_input_field_previews,
@@ -35,7 +37,6 @@ from yuuagents.types import StepResult
 
 S = TypeVar("S")
 M = TypeVar("M")
-Ctx = TypeVar("Ctx")
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +71,7 @@ class _BgTaskInfo:
     tool_name: str
     child: "Flow[Any, Any]"
     task: "asyncio.Task[None]"    # the _bg_finish wrapper task
-    tool_task: "asyncio.Task[str]"  # the actual tool execution task
+    tool_task: "asyncio.Task[yuullm.Message]"  # the actual tool execution task
 
 
 def _usage_total_tokens(usage: yuullm.Usage) -> int:
@@ -279,11 +280,11 @@ class Flow(Generic[S, M]):
 
 
 @define
-class Agent(Generic[Ctx]):
+class Agent:
     """An LLM agent: observable, interruptible, addressable."""
 
     config: AgentConfig
-    ctx: Ctx
+    ctx: AgentContext
     conversation_id: UUID | None = None
     initial_messages: list[yuullm.Message] = field(factory=list)
     startup_input: AgentInput | None = None
@@ -473,16 +474,17 @@ class Agent(Generic[Ctx]):
         while True:
             self._prune_children()
             self.rounds += 1
+            prev_len = len(self.messages)
             tool_calls = await self._call_llm()
             if not tool_calls:
                 await self._wait_pending_bg()
                 if self._drain_mailbox():
                     continue
-                yield StepResult(done=True, tokens=self.total_tokens, rounds=self.rounds)
+                yield StepResult(done=True, tokens=self.total_tokens, rounds=self.rounds, delta=tuple(self.messages[prev_len:]))
                 return
             await self._run_tools(tool_calls)
             self._drain_mailbox()
-            yield StepResult(done=False, tokens=self.total_tokens, rounds=self.rounds)
+            yield StepResult(done=False, tokens=self.total_tokens, rounds=self.rounds, delta=tuple(self.messages[prev_len:]))
 
     async def _wait_pending_bg(self) -> None:
         """Wait for all background tasks to complete."""
@@ -582,11 +584,8 @@ class Agent(Generic[Ctx]):
         kwargs: dict[str, Any],
         child: Flow[Any, Any],
         span: ytrace.ToolSpan | None,
-    ) -> str:
-        ctx = self.ctx
-        evolve = getattr(ctx, "evolve", None)
-        if callable(evolve):
-            ctx = evolve(current_run_id=child.id, current_flow=child)
+    ) -> yuullm.Message:
+        ctx = attrs.evolve(self.ctx, current_run_id=child.id, current_flow=child)
         bound = self.config.tools[tc.name].bind(ctx)
         try:
             result = await bound.run(**kwargs)
@@ -596,13 +595,14 @@ class Agent(Generic[Ctx]):
                 span.fail(error_msg)
                 span.end()
             child.emit(error_msg)
-            return error_msg
+            return yuullm.tool(tc.id, error_msg)
         child.emit(result)
-        output = str(result)
+        msg = _coerce_tool_output(result, tc.id)
+        output_str = _message_text_for_span(msg)
         if span is not None:
-            span.ok(output)
+            span.ok(output_str)
             span.end()
-        return output
+        return msg
 
     async def _run_tools(self, tool_calls: list[yuullm.ToolCall]) -> None:
         chat = self._chat
@@ -612,7 +612,7 @@ class Agent(Generic[Ctx]):
         if chat is not None:
             tools_ctx = chat.start_tools()
 
-        tasks: dict[str, tuple[yuullm.ToolCall, Flow[Any, Any], asyncio.Task[str], ytrace.ToolSpan | None]] = {}
+        tasks: dict[str, tuple[yuullm.ToolCall, Flow[Any, Any], asyncio.Task[yuullm.Message], ytrace.ToolSpan | None]] = {}
         for tc in tool_calls:
             child = self.flow.spawn("tool")
             child.info["tool_name"] = tc.name
@@ -705,9 +705,10 @@ class Agent(Generic[Ctx]):
                         span.fail(content)
                         span.end()
                 else:
-                    output = task.result()
-                    self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=output))
-                    self.messages.append(yuullm.tool(call_id, output))
+                    tool_msg = task.result()
+                    output_str = _message_text_for_span(tool_msg)
+                    self.flow.emit(ToolResult(call_id=call_id, name=tc.name, output=output_str))
+                    self.messages.append(tool_msg)
             else:
                 run_id = child.id
                 # Include partial output from self-defer if available.
@@ -738,25 +739,27 @@ class Agent(Generic[Ctx]):
         self,
         call_id: str,
         run_id: str,
-        task: asyncio.Task[str],
+        task: asyncio.Task[yuullm.Message],
         span: ytrace.ToolSpan | None,
     ) -> None:
+        result_text: str
         try:
-            result = await task
+            result_msg = await task
+            result_text = _message_text_for_span(result_msg)
         except asyncio.CancelledError:
-            result = "cancelled"
+            result_text = "cancelled"
             if span is not None:
-                span.fail(result)
+                span.fail(result_text)
                 span.end()
         except Exception as exc:
-            result = f"{type(exc).__name__}: {exc}"
+            result_text = f"{type(exc).__name__}: {exc}"
             if span is not None:
-                span.fail(result)
+                span.fail(result_text)
                 span.end()
         else:
             # span.ok/end already called by _exec_tool on success
             pass
-        text = f"[bg:{run_id}] {result}"
+        text = f"[bg:{run_id}] {result_text}"
         if self._chat is not None:
             self._chat.user(text)
         self.flow.send(yuullm.user(text))
@@ -878,3 +881,45 @@ def _trace_items_for_log(reasoning_items: list[str], assistant_items: list[Any])
 def _msg_text(msg: yuullm.Message) -> str:
     """Extract display text from a yuullm.Message."""
     return render_message_text(msg)
+
+
+def _coerce_tool_output(result: Any, call_id: str) -> yuullm.Message:
+    """Wrap a tool return value into a yuullm.Message with role 'tool'.
+
+    Tools must return ``str``, ``yuullm.Item``, or ``list[yuullm.Item]``.
+    A single Item is wrapped into a one-element list automatically.
+    Any other type raises ``TypeError``.
+    """
+    if isinstance(result, str):
+        return yuullm.tool(call_id, result)
+    if isinstance(result, list):
+        return yuullm.tool(call_id, result)  # type: ignore[arg-type]
+    if isinstance(result, dict):  # yuullm.Item is a TypedDict (dict at runtime)
+        return yuullm.tool(call_id, [result])  # type: ignore[arg-type]
+    raise TypeError(
+        f"tool must return str, Item, or list[Item], got {type(result).__name__!r}"
+    )
+
+
+def _message_text_for_span(msg: yuullm.Message) -> str:
+    """Extract a plain-text representation of a message for spans and bg notifications."""
+    _, items = msg
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            parts.append(str(item))
+            continue
+        item_type = item.get("type", "")
+        if item_type == "text":
+            parts.append(item.get("text", ""))
+        elif item_type == "tool_result":
+            content = item.get("content", "")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for sub in content:
+                    if isinstance(sub, dict) and sub.get("type") == "text":
+                        parts.append(sub.get("text", ""))
+        else:
+            parts.append(str(item))
+    return "".join(parts)

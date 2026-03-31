@@ -1,4 +1,4 @@
-"""delegate — run another configured agent and return its final text response."""
+"""delegate — run another configured agent and return its final response."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import asyncio
 
 import yuullm
 import yuutools as yt
-from yuullm.types import is_text_item
 
 from yuuagents.context import (
     DelegateDepthExceededError,
@@ -16,16 +15,6 @@ from yuuagents.pool import AgentPool
 from yuuagents.input import HandoffInput
 from yuuagents.runtime_session import Session
 from yuuagents.types import AgentStatus
-
-
-def _last_assistant_text(session: Session) -> str:
-    for role, items in reversed(session.history):
-        if role != "assistant":
-            continue
-        text = "".join(item["text"] for item in items if is_text_item(item)).strip()
-        if text:
-            return text
-    return ""
 
 
 @yt.tool(
@@ -38,7 +27,7 @@ def _last_assistant_text(session: Session) -> str:
     description=(
         "Delegate work to another configured agent. "
         "Builds a structured handoff input for the delegated agent. "
-        "Returns the delegated agent's final text response."
+        "Returns the delegated agent's final response."
     ),
 )
 async def delegate(
@@ -50,7 +39,7 @@ async def delegate(
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
     parent_run_id: str = yt.depends(lambda ctx: ctx.current_run_id),
     delegate_depth: int = yt.depends(lambda ctx: ctx.delegate_depth),
-) -> str:
+) -> list[yuullm.Item] | str:
     if parent is None:
         raise RuntimeError("delegate requires an active parent session")
 
@@ -83,4 +72,12 @@ async def delegate(
         raise
     except Exception:
         child.status = AgentStatus.ERROR
-    return _last_assistant_text(child) or child.status.value
+    response = child.final_response()
+    if response is None:
+        return "[delegate] agent produced no response"
+    _, items = response
+    content: list[yuullm.Item] = [
+        item for item in items
+        if isinstance(item, dict) and item.get("type") in ("text", "image_url")
+    ]
+    return content if content else "[delegate] agent produced no output"

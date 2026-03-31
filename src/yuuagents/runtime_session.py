@@ -35,7 +35,7 @@ class Session:
     created_at: datetime = field(factory=lambda: datetime.now(timezone.utc))
     mailbox_id: str = field(factory=lambda: uuid4().hex)
     stored_steps: int = 0  # for persisted sessions loaded without a live agent
-    agent: FlowAgent[AgentContext] | None = field(default=None, init=False)
+    agent: FlowAgent | None = field(default=None, init=False)
 
     # -- property delegates (read from agent when alive, zero otherwise) --
 
@@ -108,7 +108,7 @@ class Session:
         conversation_id: UUID | None = None,
         initial_messages: list[yuullm.Message] | None = None,
         startup_input: AgentInput | None = None,
-    ) -> FlowAgent[AgentContext]:
+    ) -> FlowAgent:
         cfg = self.config if system is None else attrs.evolve(self.config, system=system)
         return FlowAgent(
             config=cfg,
@@ -121,7 +121,7 @@ class Session:
     def start(self, agent_input: AgentInput) -> None:
         """Create the underlying FlowAgent for the given startup input."""
         self.input = agent_input
-        self.context = self.context.evolve(session=self)
+        self.context.session = self
         agent = self._make_agent(startup_input=agent_input)
         agent.start(agent_input)
         self.agent = agent
@@ -148,7 +148,7 @@ class Session:
         """Resume from prior history with a new structured startup input."""
         if agent_input is not None:
             self.input = agent_input
-        self.context = self.context.evolve(session=self)
+        self.context.session = self
         agent = self._make_agent(
             system=system,
             conversation_id=conversation_id,
@@ -229,6 +229,13 @@ class Session:
         if child_flow not in parent.children:
             parent.children.append(child_flow)
         return True
+
+    def final_response(self) -> yuullm.Message | None:
+        """Return the last assistant message from the session history, or None."""
+        for message in reversed(self.history):
+            if message[0] == "assistant":
+                return message
+        return None
 
     async def wait(self) -> None:
         """Wait for the agent's flow to complete."""

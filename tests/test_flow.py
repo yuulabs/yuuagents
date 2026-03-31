@@ -15,6 +15,7 @@ import yuullm
 import yuutrace as ytrace
 import yuutools as yt
 from yuuagents.agent import AgentConfig
+from yuuagents.context import AgentContext
 from yuuagents.input import ConversationInput
 from yuuagents.types import StepResult
 from yuuagents.core.flow import (
@@ -90,7 +91,7 @@ def make_agent(
     client: yuullm.YLLMClient,
     manager: yt.ToolManager,
     *,
-    ctx: object = None,
+    ctx: AgentContext | None = None,
     system: str = "",
     agent_id: str = "test",
     conversation_id: uuid.UUID | None = None,
@@ -104,6 +105,8 @@ def make_agent(
         system=system,
         tool_batch_timeout=tool_batch_timeout,
     )
+    if ctx is None:
+        ctx = AgentContext(task_id="test", agent_id=agent_id, workdir="")
     return Agent(config=config, ctx=ctx, conversation_id=conversation_id)
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import attrs
 import pytest
 import yuullm
 import yuutools as yt
@@ -163,11 +164,11 @@ def _bind(tool_obj: Any, ctx: AgentContext) -> Any:
 async def test_delegate_tool_starts_child_session_and_returns_last_text():
     pool = _FakePool()
     parent = _make_session(pool, agent_id="parent", reply="unused")
-    parent.context = parent.context.evolve(session=parent)
+    parent.context.session = parent
 
     result = await _bind(
         delegate,
-        parent.context.evolve(current_run_id="run-123"),
+        attrs.evolve(parent.context, current_run_id="run-123"),
     ).run(
         agent="coder",
         context="repo=demo",
@@ -175,7 +176,10 @@ async def test_delegate_tool_starts_child_session_and_returns_last_text():
         tools=["read_file"],
     )
 
-    assert result == "delegated done"
+    # delegate returns content items from the child's final assistant message
+    assert isinstance(result, list)
+    text = "".join(item["text"] for item in result if isinstance(item, dict) and item.get("type") == "text")
+    assert text == "delegated done"
     assert pool.started == [
         (
             "run-123",
