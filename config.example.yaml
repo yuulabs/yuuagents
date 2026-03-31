@@ -4,7 +4,9 @@
 #
 # This is the repository reference configuration with all available options
 # and their default values. It is not bundled into the installed package.
-# Copy it, edit it for your host environment, then run `yagents install`
+# Base `pip install yuuagents` already includes the CLI and daemon bootstrap
+# runtime. Copy this file, edit it for your host environment, then run
+# `yagents install`
 # or `yagents install --config /path/to/config.yaml`.
 #
 # To customise settings without editing this file, create a
@@ -39,14 +41,18 @@ daemon:
   # Log level: debug | info | warning | error
   log_level: info
 
-# -- Docker (REQUIRED) -------------------------------------------------------
-# yagents runs ALL agent tools (bash, file read/write) inside Docker
-# containers for security isolation.  A running Docker daemon is mandatory.
+# -- Docker (OPTIONAL) -------------------------------------------------------
+# Docker is only needed for bash/file tools such as `execute_bash`,
+# `read_file`, `edit_file`, and `delete_file`.
 #
 # Prerequisites:
 #   1. Install Docker Engine — https://docs.docker.com/engine/install/
 #   2. Ensure your user is in the `docker` group (or use rootless Docker).
 #   3. Run `yagents install` to build or pull the default image automatically.
+#
+# Without Docker, the daemon can still run agents that only use non-Docker
+# tools such as `sleep`, `update_todo`, `view_image`, `delegate`, or
+# `web_search` (if `yuuagents[web]` is installed).
 
 docker:
   # Default Docker image for agent containers.

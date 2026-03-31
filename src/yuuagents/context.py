@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar, cast
 
-from attrs import define, evolve, field
+from attrs import define, field
 
 from yuuagents.capabilities import AgentCapabilities
 
@@ -29,6 +29,16 @@ class DelegateDepthExceededError(RuntimeError):
         super().__init__(msg)
 
 
+_MISSING = object()
+T = TypeVar("T")
+
+
+def _replace(current: T, value: T | object) -> T:
+    if value is _MISSING:
+        return current
+    return cast(T, value)
+
+
 @define
 class AgentContext:
     """Injected into tools via ``yt.depends()``.
@@ -45,5 +55,25 @@ class AgentContext:
     current_run_id: str = ""
     current_flow: Flow | None = None
 
-    def evolve(self, **changes: object) -> AgentContext:
-        return evolve(self, **changes)
+    def evolve(
+        self,
+        *,
+        task_id: str | object = _MISSING,
+        agent_id: str | object = _MISSING,
+        workdir: str | object = _MISSING,
+        capabilities: AgentCapabilities | object = _MISSING,
+        delegate_depth: int | object = _MISSING,
+        session: Session | None | object = _MISSING,
+        current_run_id: str | object = _MISSING,
+        current_flow: Flow | None | object = _MISSING,
+    ) -> AgentContext:
+        return AgentContext(
+            task_id=_replace(self.task_id, task_id),
+            agent_id=_replace(self.agent_id, agent_id),
+            workdir=_replace(self.workdir, workdir),
+            capabilities=_replace(self.capabilities, capabilities),
+            delegate_depth=_replace(self.delegate_depth, delegate_depth),
+            session=_replace(self.session, session),
+            current_run_id=_replace(self.current_run_id, current_run_id),
+            current_flow=_replace(self.current_flow, current_flow),
+        )

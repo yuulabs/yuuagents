@@ -25,6 +25,16 @@ class SetupConfig(TypedDict):
 
 YAGENTS_HOME = Path("~/.yagents").expanduser()
 CONFIG_PATH = YAGENTS_HOME / "config.yaml"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+OVERRIDES_PATH = PROJECT_ROOT / "config.overrides.yaml"
+
+
+def run_yagents(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["yagents", *args],
+        cwd=PROJECT_ROOT,
+        **kwargs,
+    )
 
 
 def print_banner() -> None:
@@ -42,11 +52,13 @@ def check_prerequisites() -> None:
 
     # 检查 yagents
     try:
-        subprocess.run(["yagents", "--version"], capture_output=True, check=True)
+        result = run_yagents(["--version"], capture_output=True, text=True, check=True)
         print("  ✓ yagents 已安装")
-    except (FileNotFoundError, subprocess.CalledProcessError):
+        print(f"    {result.stdout.strip()}")
+    except FileNotFoundError, subprocess.CalledProcessError:
         print("  ✗ yagents 未安装")
-        print("\n请先安装 service mode 依赖: pip install -e '.[all]'")
+        print("\n请先在仓库里执行: uv sync --extra docker --extra web")
+        print("或安装: pip install 'yuuagents[docker,web]'")
         sys.exit(1)
 
     # 检查 Docker
@@ -55,7 +67,7 @@ def check_prerequisites() -> None:
             ["docker", "--version"], capture_output=True, text=True, check=True
         )
         print(f"  ✓ Docker 已安装: {result.stdout.strip()}")
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    except FileNotFoundError, subprocess.CalledProcessError:
         print("  ✗ Docker 未安装")
         print("\n请先安装: https://docs.docker.com/engine/install/")
         sys.exit(1)
@@ -140,15 +152,19 @@ def setup_yagents(config: SetupConfig) -> None:
     if config["tavily_key"]:
         overrides["tavily"] = {"api_key_env": "TAVILY_API_KEY"}
 
-    overrides_path = Path("config.overrides.yaml")
-    overrides_path.write_text(
-        yaml.dump(overrides, default_flow_style=False, allow_unicode=True)
+    OVERRIDES_PATH.write_text(
+        yaml.dump(overrides, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
     )
 
     print("运行 install...")
-    result = subprocess.run(["yagents", "install"], capture_output=True, text=True)
+    result = run_yagents(
+        ["install", "--project-dir", str(PROJECT_ROOT)],
+        capture_output=True,
+        text=True,
+    )
 
-    overrides_path.unlink(missing_ok=True)
+    OVERRIDES_PATH.unlink(missing_ok=True)
 
     if result.returncode == 0:
         print("  ✓ install 完成")
@@ -166,14 +182,14 @@ def start_daemon() -> None:
 
     # 尝试停止已有的
     try:
-        subprocess.run(["yagents", "down"], capture_output=True, timeout=5)
+        run_yagents(["down"], capture_output=True, timeout=5)
     except Exception:
         pass
 
     # 启动 daemon
     print("启动 daemon (后台)...")
-    result = subprocess.run(
-        ["yagents", "up", "-d"],
+    result = run_yagents(
+        ["up", "-d"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -201,8 +217,8 @@ def run_example_task(config: SetupConfig) -> None:
 
     print(f'\n执行: yagents run --task "{task}"\n')
 
-    result = subprocess.run(
-        ["yagents", "run", "--task", task],
+    result = run_yagents(
+        ["run", "--task", task],
         capture_output=True,
         text=True,
         timeout=30,
@@ -234,6 +250,7 @@ def print_summary() -> None:
     print("  yagents stop <task_id>")
     print()
     print("配置: ~/.yagents/config.yaml")
+    print(f"项目模板: {PROJECT_ROOT / 'config.example.yaml'}")
     print("说明: 这个脚本面向 daemon / service mode，不是纯 SDK quick start。")
     print()
 

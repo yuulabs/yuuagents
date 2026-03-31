@@ -1,4 +1,4 @@
-"""Lazy console entrypoint for service-mode CLI."""
+"""Lazy console entrypoint for the bundled CLI."""
 
 from __future__ import annotations
 

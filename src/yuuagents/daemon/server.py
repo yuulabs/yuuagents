@@ -9,6 +9,7 @@ import shutil
 import signal
 import socket
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 
@@ -16,8 +17,45 @@ import yuutrace as ytrace
 
 from yuuagents.config import Config
 from yuuagents.daemon.api import create_app
-from yuuagents.daemon.docker import DockerManager
 from yuuagents.daemon.manager import AgentManager
+
+
+class NullDockerManager:
+    """Fallback manager used when docker support is unavailable."""
+
+    def __init__(self, image: str) -> None:
+        self.image = image
+
+    @property
+    def workdir(self) -> str:
+        return str(Path.cwd())
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def resolve(
+        self,
+        *,
+        task_id: str = "",
+        container: str = "",
+        image: str = "",
+    ) -> str:
+        del task_id, container, image
+        raise ValueError(
+            "docker capability unavailable in this installation; "
+            "install `yuuagents[docker]` and ensure Docker Engine is reachable"
+        )
+
+
+def _make_docker_manager(image: str) -> Any:
+    try:
+        from yuuagents.daemon.docker import DockerManager
+    except ModuleNotFoundError:
+        return NullDockerManager(image=image)
+    return DockerManager(image=image)
 
 
 async def serve(config: Config) -> None:
@@ -28,7 +66,7 @@ async def serve(config: Config) -> None:
         service_name="yuuagents",
     )
 
-    docker = DockerManager(image=config.docker.image)
+    docker = _make_docker_manager(config.docker.image)
     manager = AgentManager(config=config, docker=docker, db_url=config.db_url)
     await manager.start()
 

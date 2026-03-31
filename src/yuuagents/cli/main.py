@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import json
 import os
 import re
@@ -31,7 +32,11 @@ if TYPE_CHECKING:
     from yuuagents.cli.client import YAgentsClient
 
 from yuuagents.cli.client import DaemonNotRunningError
-from yuuagents.input import agent_input_to_jsonable, conversation_input_from_text, message_to_jsonable
+from yuuagents.input import (
+    agent_input_to_jsonable,
+    conversation_input_from_text,
+    message_to_jsonable,
+)
 
 
 _DOTENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -94,7 +99,15 @@ def _client(ctx: click.Context) -> YAgentsClient:
     return YAgentsClient(_socket(ctx))
 
 
+def _cli_version() -> str:
+    try:
+        return importlib.metadata.version("yuuagents")
+    except importlib.metadata.PackageNotFoundError:
+        return "0+unknown"
+
+
 @click.group()
+@click.version_option(version=_cli_version(), prog_name="yagents")
 @click.option(
     "--socket",
     default=None,
@@ -391,15 +404,23 @@ def install(
         click.echo(
             f"  1. Set your LLM API key:  export {first_provider.api_key_env}=sk-..."
         )
+        if _agent_uses_docker_tools(cfg, "main"):
+            click.echo(
+                "  2. Optional: install Docker support or remove Docker tools from agents.main.tools"
+            )
         click.echo(
-            '  2. Run an agent:          yagents run --agent main --task "hello world"'
+            '  3. Run an agent:          yagents run --agent main --task "hello world"'
         )
     else:
         click.echo("Next steps:")
         click.echo("  1. Configure at least one provider in ~/.yagents/config.yaml")
         click.echo("  2. Set your LLM API key")
+        if _agent_uses_docker_tools(cfg, "main"):
+            click.echo(
+                "  3. Optional: install Docker support or remove Docker tools from agents.main.tools"
+            )
         click.echo(
-            '  3. Run an agent:          yagents run --agent main --task "hello world"'
+            '  4. Run an agent:          yagents run --agent main --task "hello world"'
         )
 
 
@@ -696,6 +717,16 @@ def _docker_timeout_seconds() -> int:
     return 30
 
 
+def _agent_uses_docker_tools(cfg: Config, agent_name: str) -> bool:
+    entry = cfg.agents.get(agent_name)
+    if entry is None:
+        return False
+    return any(
+        name in {"execute_bash", "read_file", "edit_file", "delete_file"}
+        for name in entry.tools
+    )
+
+
 # ── Configuration management ──
 
 
@@ -944,7 +975,13 @@ def up(
         click.echo("Daemon started in background.")
         return
 
-    from yuuagents.daemon.server import serve
+    try:
+        from yuuagents.daemon.server import serve
+    except ModuleNotFoundError as exc:
+        from yuuagents.service_requirements import service_dependency_message
+
+        raise SystemExit(service_dependency_message("yagents up", exc)) from exc
+
     import msgspec
 
     # -- Resolve the "new" config that the user wants to run with --

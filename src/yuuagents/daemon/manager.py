@@ -22,7 +22,7 @@ from yuuagents.capabilities import AgentCapabilities, DockerCapability, WebCapab
 from yuuagents.config import Config, ProviderConfig
 from yuuagents.context import AgentContext
 from yuuagents.core.flow import render_agent_event
-from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT, DockerManager
+from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT
 from yuuagents.input import AgentInput
 from yuuagents.persistence import TaskPersistence, TaskWriter
 from yuuagents.prompts import get_vars as get_prompt_vars
@@ -76,7 +76,7 @@ def _truncate_text(text: str, max_chars: int) -> str:
 @define
 class AgentManager:
     config: Config
-    docker: DockerManager
+    docker: Any
     db_url: str = ""
     _sessions: dict[str, Session] = field(factory=dict)
     _contexts: dict[str, AgentContext] = field(factory=dict)
@@ -87,7 +87,6 @@ class AgentManager:
     _delegate_sessions_by_run_id: dict[str, Session] = field(factory=dict)
 
     async def start(self) -> None:
-        await self.docker.start()
         db_url = self.db_url or self.config.db_url
         self._persistence = TaskPersistence(db_url=db_url)
         await self._persistence.start()
@@ -659,11 +658,19 @@ class AgentManager:
         )
         # Resolve docker container for root, or reuse parent's for child.
         if needs_docker and docker_capability is None:
-            docker_container = await self.docker.resolve(
-                task_id=task_id,
-                container=req.container,
-                image=req.image,
-            )
+            try:
+                docker_container = await self.docker.resolve(
+                    task_id=task_id,
+                    container=req.container,
+                    image=req.image,
+                )
+            except ValueError:
+                raise
+            except Exception as exc:
+                raise ValueError(
+                    "docker tools requested but Docker is unavailable; "
+                    "install `yuuagents[docker]` and ensure Docker Engine is reachable"
+                ) from exc
             docker_capability = DockerCapability(
                 executor=self.docker,
                 container_id=docker_container,

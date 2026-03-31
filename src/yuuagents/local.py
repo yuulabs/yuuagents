@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Iterable
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import attrs
@@ -26,8 +27,8 @@ def _default_workdir() -> str:
 
 
 def _coerce_tools(
-    tools: yt.ToolManager | Iterable[object] | None,
-) -> yt.ToolManager:
+    tools: yt.ToolManager[Any] | Iterable[yt.Tool[Any]] | None,
+) -> yt.ToolManager[Any]:
     if tools is None:
         return yt.ToolManager()
     if isinstance(tools, yt.ToolManager):
@@ -145,7 +146,7 @@ class LocalAgent:
     """Thin SDK wrapper for local agent development."""
 
     llm: yuullm.YLLMClient
-    tools: yt.ToolManager = field(factory=yt.ToolManager, converter=_coerce_tools)
+    tools: yt.ToolManager[Any] = field(factory=yt.ToolManager, converter=_coerce_tools)
     agent_id: str = "local"
     system: str = ""
     workdir: str = field(factory=_default_workdir)
@@ -160,7 +161,7 @@ class LocalAgent:
         cls,
         *,
         llm: yuullm.YLLMClient,
-        tools: yt.ToolManager | Iterable[object] | None = None,
+        tools: yt.ToolManager[Any] | Iterable[yt.Tool[Any]] | None = None,
         agent_id: str = "local",
         system: str = "",
         workdir: str | None = None,
@@ -230,7 +231,7 @@ async def run_once(
     task: str | AgentInput,
     *,
     llm: yuullm.YLLMClient,
-    tools: yt.ToolManager | Iterable[object] | None = None,
+    tools: yt.ToolManager[Any] | Iterable[yt.Tool[Any]] | None = None,
     agent_id: str = "local",
     system: str = "",
     workdir: str | None = None,

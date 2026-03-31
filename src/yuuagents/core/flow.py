@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from typing import Any, Generic, TypeVar, cast
+from typing import Any, Generic, TypeVar
 from uuid import UUID, uuid4
 
 import msgspec
@@ -118,6 +118,14 @@ def _load_tool_kwargs(tc: yuullm.ToolCall) -> dict[str, Any]:
     if not isinstance(kwargs, dict):
         raise _tool_args_error(tc, TypeError("decoded arguments must be a JSON object"))
     return kwargs
+
+
+def _stringify_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +528,12 @@ class Agent(Generic[Ctx]):
             self.flow.emit(item)
             match item:
                 case yuullm.Reasoning(item=reasoning):
-                    reasoning_items.append(reasoning.get("text", "") if isinstance(reasoning, dict) else str(reasoning))
+                    if isinstance(reasoning, dict):
+                        reasoning_items.append(
+                            _stringify_text(reasoning.get("text", ""))
+                        )
+                    else:
+                        reasoning_items.append(_stringify_text(reasoning))
                 case yuullm.Response(item=resp):
                     assistant_items.append(resp)
                 case yuullm.ToolCall() as tc:
@@ -623,18 +636,18 @@ class Agent(Generic[Ctx]):
             tasks[tc.id] = (tc, child, task, span)
 
         # wait all OR defer signal (external or per-tool self-defer)
-        pending: set[asyncio.Task[object]] = {
-            cast(asyncio.Task[object], task) for _, _, task, _ in tasks.values()
+        pending: set[asyncio.Task[Any]] = {
+            task for _, _, task, _ in tasks.values()
         }
-        defer_task = asyncio.create_task(self._defer.wait())
+        defer_task: asyncio.Task[Any] = asyncio.create_task(self._defer.wait())
 
         # Optional batch-level timeout
-        timeout_task: asyncio.Task[None] | None = None
+        timeout_task: asyncio.Task[Any] | None = None
         if self.config.tool_batch_timeout > 0:
             timeout_task = asyncio.create_task(asyncio.sleep(self.config.tool_batch_timeout))
 
         # Track per-tool self-defer requests.
-        child_defer_tasks: dict[asyncio.Task[bool], str] = {}
+        child_defer_tasks: dict[asyncio.Task[Any], str] = {}
         for call_id, (tc, child, task, span) in tasks.items():
             cdt = asyncio.create_task(child._defer_requested.wait())
             child_defer_tasks[cdt] = call_id
@@ -642,12 +655,10 @@ class Agent(Generic[Ctx]):
         self_deferred: set[str] = set()  # call_ids that self-deferred
 
         while pending:
-            signals: set[asyncio.Task[object]] = {
-                cast(asyncio.Task[object], defer_task)
-            }
-            signals.update(cast(asyncio.Task[object], task) for task in child_defer_tasks)
+            signals: set[asyncio.Task[Any]] = {defer_task}
+            signals.update(child_defer_tasks)
             if timeout_task is not None:
-                signals.add(cast(asyncio.Task[object], timeout_task))
+                signals.add(timeout_task)
             done, pending = await asyncio.wait(
                 pending | signals, return_when=asyncio.FIRST_COMPLETED,
             )
@@ -658,7 +669,7 @@ class Agent(Generic[Ctx]):
                 cid = child_defer_tasks.pop(cdt)
                 self_deferred.add(cid)
                 _, _, t, _ = tasks[cid]
-                pending.discard(cast(asyncio.Task[object], t))
+                pending.discard(t)
 
             if defer_task in done:
                 break
@@ -777,7 +788,10 @@ class Agent(Generic[Ctx]):
 def _trace_item(item: Any) -> Any:
     """Convert an assistant item to a trace-friendly form."""
     if isinstance(item, yuullm.Reasoning):
-        text = item.item.get("text", "") if isinstance(item.item, dict) else str(item.item)
+        if isinstance(item.item, dict):
+            text = _stringify_text(item.item.get("text", ""))
+        else:
+            text = _stringify_text(item.item)
         return {"type": "reasoning", "text": text}
     if isinstance(item, dict):
         return item
@@ -816,12 +830,15 @@ def _normalize_assistant_items(items: list[Any], *, group_tool_calls: bool = Tru
         if isinstance(item, yuullm.Reasoning):
             _flush_text()
             _flush_tool_calls()
-            reasoning_parts.append(item.item.get("text", "") if isinstance(item.item, dict) else str(item.item))
+            if isinstance(item.item, dict):
+                reasoning_parts.append(_stringify_text(item.item.get("text", "")))
+            else:
+                reasoning_parts.append(_stringify_text(item.item))
             continue
         if isinstance(item, dict) and item.get("type") == "text":
             _flush_reasoning()
             _flush_tool_calls()
-            text_parts.append(item.get("text", ""))
+            text_parts.append(_stringify_text(item.get("text", "")))
             continue
         if isinstance(item, dict) and item.get("type") == "tool_call":
             _flush_text()

@@ -34,7 +34,10 @@ def _load_rich() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]:
         table_mod = importlib.import_module("rich.table")
         rich_mod = importlib.import_module("rich")
     except ImportError:
-        print("请先安装 rich: pip install rich")
+        print(
+            "请先在仓库里执行: uv sync --extra docker --extra web --group examples"
+        )
+        print("或单独安装 rich: pip install rich")
         sys.exit(1)
     return (
         console_mod.Console,
@@ -49,11 +52,23 @@ def _load_rich() -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]:
     )
 
 
-Console, Panel, Confirm, Prompt, Progress, SpinnerColumn, TextColumn, Table, box = _load_rich()
+Console, Panel, Confirm, Prompt, Progress, SpinnerColumn, TextColumn, Table, box = (
+    _load_rich()
+)
 console = Console()
 
 YAGENTS_HOME = Path("~/.yagents").expanduser()
 CONFIG_PATH = YAGENTS_HOME / "config.yaml"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+OVERRIDES_PATH = PROJECT_ROOT / "config.overrides.yaml"
+
+
+def run_yagents(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["yagents", *args],
+        cwd=PROJECT_ROOT,
+        **kwargs,
+    )
 
 
 def print_header() -> None:
@@ -74,14 +89,14 @@ def check_prerequisites() -> None:
 
     # 检查 yagents 是否安装
     try:
-        result = subprocess.run(
-            ["yagents", "--version"], capture_output=True, text=True
-        )
+        result = run_yagents(["--version"], capture_output=True, text=True, check=True)
         console.print("  [green]✓[/green] yagents 已安装")
-    except FileNotFoundError:
+        console.print(f"    {result.stdout.strip()}")
+    except FileNotFoundError, subprocess.CalledProcessError:
         console.print("  [red]✗ yagents 未安装[/red]")
         console.print("\n[yellow]请先安装 service mode 依赖:[/yellow]")
-        console.print("  pip install -e '.[all]'")
+        console.print("  uv sync --extra docker --extra web")
+        console.print("  或 pip install 'yuuagents[docker,web]'")
         sys.exit(1)
 
     # 检查 Docker
@@ -230,9 +245,9 @@ def setup_yagents(config: SetupConfig) -> None:
     if config["tavily_key"]:
         overrides["tavily"] = {"api_key_env": "TAVILY_API_KEY"}
 
-    overrides_path = Path("config.overrides.yaml")
-    overrides_path.write_text(
-        yaml.dump(overrides, default_flow_style=False, allow_unicode=True)
+    OVERRIDES_PATH.write_text(
+        yaml.dump(overrides, default_flow_style=False, allow_unicode=True),
+        encoding="utf-8",
     )
 
     with Progress(
@@ -243,8 +258,8 @@ def setup_yagents(config: SetupConfig) -> None:
         task = progress.add_task("运行 yagents install...", total=None)
 
         try:
-            result = subprocess.run(
-                ["yagents", "install"],
+            result = run_yagents(
+                ["install", "--project-dir", str(PROJECT_ROOT)],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -262,7 +277,7 @@ def setup_yagents(config: SetupConfig) -> None:
             sys.exit(1)
 
     # 清理临时文件
-    overrides_path.unlink(missing_ok=True)
+    OVERRIDES_PATH.unlink(missing_ok=True)
 
     console.print()
 
@@ -273,8 +288,8 @@ def start_daemon() -> None:
 
     # 检查 daemon 是否已在运行
     try:
-        subprocess.run(
-            ["yagents", "down"],
+        run_yagents(
+            ["down"],
             capture_output=True,
             timeout=5,
         )
@@ -283,8 +298,8 @@ def start_daemon() -> None:
 
     # 启动 daemon (后台)
     console.print("启动 daemon...")
-    result = subprocess.run(
-        ["yagents", "up", "-d"],
+    result = run_yagents(
+        ["up", "-d"],
         capture_output=True,
         text=True,
         timeout=30,
@@ -299,8 +314,8 @@ def start_daemon() -> None:
 
     # 检查是否成功启动
     try:
-        subprocess.run(
-            ["yagents", "list"],
+        run_yagents(
+            ["list"],
             capture_output=True,
             check=True,
             timeout=5,
@@ -353,7 +368,7 @@ def run_first_task(config: SetupConfig) -> None:
 
     # 执行任务
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = run_yagents(cmd[1:], capture_output=True, text=True, timeout=30)
 
         if result.returncode == 0:
             match = re.search(r"Task started:\s+(\S+)", result.stdout)
@@ -372,8 +387,8 @@ def run_first_task(config: SetupConfig) -> None:
             console.print("\n[bold]等待 5 秒后检查任务状态...[/bold]\n")
             time.sleep(5)
 
-            status_result = subprocess.run(
-                ["yagents", "status", task_id],
+            status_result = run_yagents(
+                ["status", task_id],
                 capture_output=True,
                 text=True,
             )

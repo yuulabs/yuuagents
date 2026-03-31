@@ -31,7 +31,7 @@ uv run python examples/sdk_quickstart.py
 
 ```bash
 cd /path/to/yuuagents
-uv sync --extra daemon --extra docker --extra web
+uv sync --extra docker --extra web
 uv run python examples/simple_start.py
 ```
 
@@ -41,9 +41,13 @@ uv run python examples/simple_start.py
 
 ```bash
 cd /path/to/yuuagents
-uv sync --extra daemon --extra docker --extra web --group examples
+uv sync --extra docker --extra web --group examples
 uv run python examples/getting_started.py
 ```
+
+这两个 service-mode 脚本会自动把仓库根目录当成 `yagents install --project-dir ...`
+的来源，因此即使你从别的工作目录启动，只要脚本路径指向当前仓库副本，也能
+找到 `config.example.yaml` 并生成临时 `config.overrides.yaml`。
 
 这两个脚本都会引导你：
 
@@ -54,5 +58,6 @@ uv run python examples/getting_started.py
 
 ## Notes
 
-- `config.example.yaml` 只服务模式需要，不属于 SDK Quick Start。
+- `config.example.yaml` 只在启用 daemon 时需要，不属于 SDK Quick Start。
+- service mode 参考配置默认把 traces 数据库写到 `~/.yagents/traces.db`；如果你想放到项目目录，请手工改 `config.yaml`。
 - Docker / web 搜索依赖都是 service-mode 扩展能力。

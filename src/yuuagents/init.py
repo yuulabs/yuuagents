@@ -1,4 +1,4 @@
-"""SDK initialization — programmatic equivalent of ``yagents install`` + ``yagents up``.
+"""Daemon bootstrap helper — programmatic equivalent of ``yagents install`` + ``yagents up``.
 
 Usage::
 
@@ -101,6 +101,14 @@ def _image_exists(image: str) -> bool:
         return False
 
 
+def _config_uses_docker_tools(cfg: Config) -> bool:
+    docker_tools = {"execute_bash", "read_file", "edit_file", "delete_file"}
+    return any(
+        any(tool in docker_tools for tool in agent.tools)
+        for agent in cfg.agents.values()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Daemon helpers
 # ---------------------------------------------------------------------------
@@ -158,7 +166,7 @@ def _start_daemon(config_path: Path | None = None) -> None:
 
 
 async def setup(config: str | Path | Config) -> Config:
-    """One-shot SDK initialization.
+    """One-shot daemon/bootstrap initialization.
 
     Equivalent to running ``yagents install`` followed by ``yagents up -d``.
 
@@ -223,33 +231,42 @@ async def setup(config: str | Path | Config) -> Config:
     await persistence.stop()
     logger.info("Database ready.")
 
-    # -- Step 4: ensure Docker image --
+    # -- Step 4: ensure Docker image (best-effort) --
     image = cfg.docker.image
-    if image.startswith("yuuagents-runtime:") or image == "yuuagents-runtime":
-        if not _image_exists(image):
-            logger.info("Building runtime image {} ...", image)
-            ok = build_runtime_image(image)
-            if not ok:
-                raise RuntimeError(
-                    f"Failed to build Docker image {image!r}. "
-                    "Ensure Docker is installed and running."
-                )
-            logger.info("Image {} built successfully.", image)
+    if _config_uses_docker_tools(cfg):
+        if image.startswith("yuuagents-runtime:") or image == "yuuagents-runtime":
+            if not _image_exists(image):
+                logger.info("Building runtime image {} ...", image)
+                ok = build_runtime_image(image)
+                if not ok:
+                    logger.warning(
+                        "Failed to build Docker image {}. "
+                        "Daemon startup will continue, but Docker-based tools "
+                        "will fail until Docker is installed and reachable.",
+                        image,
+                    )
+                else:
+                    logger.info("Image {} built successfully.", image)
+            else:
+                logger.debug("Image {} already exists.", image)
         else:
-            logger.debug("Image {} already exists.", image)
-    else:
-        if not _image_exists(image):
-            logger.info("Pulling image {} ...", image)
-            result = subprocess.run(
-                ["docker", "pull", image],
-                capture_output=True,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    f"Failed to pull Docker image {image!r}. "
-                    "Ensure Docker is installed and running."
+            if not _image_exists(image):
+                logger.info("Pulling image {} ...", image)
+                result = subprocess.run(
+                    ["docker", "pull", image],
+                    capture_output=True,
                 )
-            logger.info("Image {} pulled.", image)
+                if result.returncode != 0:
+                    logger.warning(
+                        "Failed to pull Docker image {}. "
+                        "Daemon startup will continue, but Docker-based tools "
+                        "will fail until Docker is installed and reachable.",
+                        image,
+                    )
+                else:
+                    logger.info("Image {} pulled.", image)
+    else:
+        logger.debug("No configured agents require Docker tools; skipping image setup.")
 
     # -- Step 5: start daemon if not running --
     socket_path = cfg.socket_path
