@@ -97,7 +97,7 @@ def _image_exists(image: str) -> bool:
             timeout=10,
         )
         return result.returncode == 0
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
@@ -194,7 +194,11 @@ async def setup(config: str | Path | Config) -> Config:
     config_file_path: Path | None = None
     if isinstance(config, (str, Path)):
         config_file_path = Path(config).expanduser().resolve()
-        cfg = config_module.load(config_file_path)
+        if config_file_path.exists():
+            cfg = config_module.load(config_file_path)
+        else:
+            cfg = config_module.load_packaged_default()
+            config_file_path = None
     else:
         cfg = config
 

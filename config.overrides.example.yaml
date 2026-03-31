@@ -1,39 +1,31 @@
 # ============================================================================
-# yagents — Configuration Overrides (EXAMPLE)
+# yuuagents — Configuration Overrides (EXAMPLE)
 # ============================================================================
 #
-# Copy this file to `config.overrides.yaml` (same directory) and edit it.
-# When you run `yagents install`, overrides are deep-merged on top of the
-# default config.example.yaml before writing to ~/.yagents/config.yaml.
-#
-# Only include the settings you want to change — everything else inherits
-# from config.example.yaml.
-#
-# This file is gitignored by default so your local settings stay private.
+# Copy this file to `config.overrides.yaml` and edit it.
+# `yagents install` deep-merges overrides on top of the bundled default
+# template, so you only need to specify the fields you want to change.
 # ============================================================================
+
+snapshot:
+  enabled: true
+  restore_on_start: false
 
 # Example: use Anthropic instead of (or in addition to) OpenAI
 # providers:
 #   anthropic-main:
 #     api_type: anthropic-messages
 #     api_key_env: ANTHROPIC_API_KEY
-#     default_model: claude-sonnet-4-20250514
-#     pricing:
-#       - model: claude-sonnet-4-20250514
-#         input_mtok: 3.00
-#         output_mtok: 15.00
-#         cache_read_mtok: 0.30
-#         cache_write_mtok: 3.75
+#     default_model: claude-3-5-sonnet-20241022
 
-# Example: point main agent to Anthropic
+# Example: enable Docker-backed tools for the main agent
 # agents:
 #   main:
-#     provider: anthropic-main
-#     model: claude-sonnet-4-20250514
-
-# Example: use a custom Docker image with your toolchain pre-installed
-# docker:
-#   image: my-dev-image:latest
+#     tools:
+#       - execute_bash
+#       - read_file
+#       - edit_file
+#       - delete_file
 
 # Example: define a custom agent
 # agents:
@@ -43,7 +35,5 @@
 #     persona: >
 #       You are a DevOps engineer specializing in CI/CD and infrastructure.
 #     tools:
-#       - execute_bash
-#       - read_file
-#       - edit_file
-#       - web_search
+#       - sleep
+#       - view_image

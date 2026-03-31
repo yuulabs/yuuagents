@@ -139,14 +139,15 @@ class Session:
 
     def resume(
         self,
-        agent_input: AgentInput,
+        agent_input: AgentInput | None,
         *,
         history: list[yuullm.Message],
         conversation_id: UUID | None = None,
         system: str | None = None,
     ) -> None:
         """Resume from prior history with a new structured startup input."""
-        self.input = agent_input
+        if agent_input is not None:
+            self.input = agent_input
         self.context = self.context.evolve(session=self)
         agent = self._make_agent(
             system=system,

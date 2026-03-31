@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,9 @@ import yaml
 
 YAGENTS_HOME = Path("~/.yagents").expanduser()
 DEFAULT_CONFIG_PATH = YAGENTS_HOME / "config.yaml"
+
+# Packaged default config template.
+_PACKAGE_DEFAULT_CONFIG_NAME = "config.default.yaml"
 
 # Project-level config files (relative to repo root).
 _PROJECT_CONFIG_NAME = "config.example.yaml"
@@ -45,9 +49,14 @@ class DbConfig(msgspec.Struct, kw_only=True):
 
 
 class YuuTraceConfig(msgspec.Struct, kw_only=True):
-    db_path: str = "./.yagents/traces.db"
+    db_path: str = "~/.yagents/traces.db"
     ui_port: int = 8080
     server_port: int = 4318
+
+
+class SnapshotConfig(msgspec.Struct, kw_only=True):
+    enabled: bool = False
+    restore_on_start: bool = False
 
 
 class PricingEntry(msgspec.Struct, kw_only=True):
@@ -93,9 +102,6 @@ class AgentEntry(msgspec.Struct, kw_only=True):
     provider: str = ""
     model: str = ""
     persona: str = ""
-    max_steps: int = 0  # 0 = unlimited
-    soft_timeout: float = 0  # 0 = disabled
-    silence_timeout: float = 0  # 0 = disabled
     subagents: list[str] = msgspec.field(default_factory=list)
     tools: list[str] = msgspec.field(default_factory=list)
 
@@ -104,6 +110,7 @@ class Config(msgspec.Struct, kw_only=True):
     daemon: DaemonConfig = msgspec.field(default_factory=DaemonConfig)
     db: DbConfig = msgspec.field(default_factory=DbConfig)
     yuutrace: YuuTraceConfig = msgspec.field(default_factory=YuuTraceConfig)
+    snapshot: SnapshotConfig = msgspec.field(default_factory=SnapshotConfig)
     docker: DockerConfig = msgspec.field(default_factory=DockerConfig)
     tavily: TavilyConfig = msgspec.field(default_factory=TavilyConfig)
     providers: dict[str, ProviderConfig] = msgspec.field(default_factory=dict)
@@ -141,6 +148,10 @@ class Config(msgspec.Struct, kw_only=True):
             errors.append("yuutrace.ui_port must be in range 1..65535")
         if not (1 <= self.yuutrace.server_port <= 65535):
             errors.append("yuutrace.server_port must be in range 1..65535")
+        if self.snapshot.restore_on_start and not self.snapshot.enabled:
+            errors.append(
+                "snapshot.restore_on_start requires snapshot.enabled to be true"
+            )
         for agent_name, entry in self.agents.items():
             if not entry.description.strip():
                 errors.append(f"agents.{agent_name}.description must not be empty")
@@ -184,6 +195,25 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def _load_yaml_mapping(text: str, *, source: str) -> dict[str, Any]:
+    data = yaml.safe_load(text) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{source} must contain a YAML mapping at the top level")
+    return data
+
+
+def load_yaml(path: str | Path) -> dict[str, Any]:
+    """Load a YAML file into a mapping."""
+    p = Path(path)
+    return _load_yaml_mapping(p.read_text(encoding="utf-8"), source=str(p))
+
+
+def load_packaged_default_yaml() -> dict[str, Any]:
+    """Load the packaged default config template."""
+    ref = resources.files(__package__).joinpath(_PACKAGE_DEFAULT_CONFIG_NAME)
+    return _load_yaml_mapping(ref.read_text(encoding="utf-8"), source=_PACKAGE_DEFAULT_CONFIG_NAME)
+
+
 def find_project_root(start: Path | None = None) -> Path | None:
     """Walk up from *start* (default: cwd) looking for a directory that
     contains ``config.example.yaml``.  Returns ``None`` if not found.
@@ -205,11 +235,15 @@ def load(path: str | Path | None = None) -> Config:
     p = Path(path) if path else DEFAULT_CONFIG_PATH
     if not p.exists():
         return Config()
-    text = p.read_text(encoding="utf-8")
-    data = yaml.safe_load(text)
+    data = load_yaml(p)
     if not data:
         return Config()
     return msgspec.convert(data, Config)
+
+
+def load_packaged_default() -> Config:
+    """Load the bundled default config template as a Config object."""
+    return msgspec.convert(load_packaged_default_yaml(), Config)
 
 
 def load_merged(
@@ -223,12 +257,12 @@ def load_merged(
     if not base_p.exists():
         raise FileNotFoundError(f"Base config not found: {base_p}")
 
-    base_data = yaml.safe_load(base_p.read_text(encoding="utf-8")) or {}
+    base_data = load_yaml(base_p)
 
     if overrides_path:
         over_p = Path(overrides_path)
         if over_p.exists():
-            over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+            over_data = load_yaml(over_p)
             base_data = _deep_merge(base_data, over_data)
 
     return msgspec.convert(base_data, Config)

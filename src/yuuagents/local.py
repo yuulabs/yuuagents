@@ -151,9 +151,6 @@ class LocalAgent:
     system: str = ""
     workdir: str = field(factory=_default_workdir)
     capabilities: AgentCapabilities = field(factory=AgentCapabilities)
-    max_steps: int = 0
-    soft_timeout: float | None = None
-    silence_timeout: float | None = None
     tool_batch_timeout: float = 0
 
     @classmethod
@@ -166,9 +163,6 @@ class LocalAgent:
         system: str = "",
         workdir: str | None = None,
         capabilities: AgentCapabilities | None = None,
-        max_steps: int = 0,
-        soft_timeout: float | None = None,
-        silence_timeout: float | None = None,
         tool_batch_timeout: float = 0,
     ) -> LocalAgent:
         return cls(
@@ -178,9 +172,6 @@ class LocalAgent:
             system=system,
             workdir=workdir or _default_workdir(),
             capabilities=capabilities or AgentCapabilities(),
-            max_steps=max_steps,
-            soft_timeout=soft_timeout,
-            silence_timeout=silence_timeout,
             tool_batch_timeout=tool_batch_timeout,
         )
 
@@ -206,9 +197,6 @@ class LocalAgent:
                 tools=self.tools,
                 llm=self.llm,
                 system=self.system,
-                max_steps=self.max_steps,
-                soft_timeout=self.soft_timeout,
-                silence_timeout=self.silence_timeout,
                 tool_batch_timeout=self.tool_batch_timeout,
             ),
             context=ctx,
@@ -238,9 +226,6 @@ async def run_once(
     capabilities: AgentCapabilities | None = None,
     task_id: str | None = None,
     context: AgentContext | None = None,
-    max_steps: int = 0,
-    soft_timeout: float | None = None,
-    silence_timeout: float | None = None,
     tool_batch_timeout: float = 0,
 ) -> LocalRunResult:
     """Convenience helper for the pure SDK path."""
@@ -251,9 +236,6 @@ async def run_once(
         system=system,
         workdir=workdir,
         capabilities=capabilities,
-        max_steps=max_steps,
-        soft_timeout=soft_timeout,
-        silence_timeout=silence_timeout,
         tool_batch_timeout=tool_batch_timeout,
     )
     return await agent.run(task, task_id=task_id, context=context)

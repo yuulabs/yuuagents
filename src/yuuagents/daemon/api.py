@@ -128,6 +128,10 @@ def create_app(
             {
                 "socket": cfg.daemon.socket,
                 "docker_image": cfg.docker.image,
+                "snapshot": {
+                    "enabled": cfg.snapshot.enabled,
+                    "restore_on_start": cfg.snapshot.restore_on_start,
+                },
                 "providers": providers_summary,
                 "agents": agents_summary,
             }

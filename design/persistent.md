@@ -1,86 +1,136 @@
-## 持久化设计
+# Snapshot 持久化设计
 
-yuuagents 有两套持久化系统：
+这份文档只描述当前实现里的 snapshot 持久化，不把 tracing、任务列表和会话历史混成一个概念。
 
-1. **任务持久化**（snapshot）：储存 agent 对话历史，用于崩溃后恢复执行。
-2. **Ytrace**（tracing）：可观测性，使用 OpenTelemetry SimpleSpanProcessor 即时导出，不做 batch。
+## 范围
 
-两者职责分离：tracing 负责即时记录每一步的可观测数据，snapshot 只负责恢复。
+当前持久化分成两层：
 
-## 储存
+- tracing：由 `yuutrace` 负责，可观测性用途
+- snapshot persistence：由 `yuuagents.persistence` 负责，恢复用途
 
-默认使用 SQLite，异步 ORM（SQLAlchemy async）。测试时使用 SQLite in-memory。
+这里讨论的是后者。
 
-两张表：`tasks`（快查）+ `task_checkpoints`（追加日志）。
+## 配置开关
 
-### tasks
+snapshot 相关开关在配置里的位置是：
 
-- `task_id`：主键
-- `agent_id`、`persona`、`task`、`system_prompt`、`model`、`tools_json`、`docker_container`
-- `status`：`running | done | error | blocked_on_input | cancelled`
-- `head_turn`：当前已持久化的最大 turn（单调递增）
-- `created_at`、`updated_at`
-- `error_json`：可选，终态错误摘要
+```yaml
+snapshot:
+  enabled: false
+  restore_on_start: false
+```
 
-### task_checkpoints
+含义如下：
 
-- `PRIMARY KEY (task_id, turn, phase)`
-- `phase`：`"snapshot"`
+- `enabled=false`：不写 snapshot，也不启动后台 writer
+- `enabled=true, restore_on_start=false`：写 snapshot，但 daemon 重启后不自动恢复
+- `enabled=true, restore_on_start=true`：写 snapshot，并在 daemon 启动时尝试恢复未完成任务
+
+`restore_on_start` 依赖 `enabled=true`，否则配置验证会报错。
+
+## 数据模型
+
+当前 SQLite schema 由 `TaskPersistence.start()` 初始化，包含两张表。
+
+### `tasks`
+
+每一行代表一个任务的主记录，字段包括：
+
+- `task_id`
+- `agent_id`
+- `persona`
+- `input_kind`
+- `input_preview`
+- `input_json`
+- `system_prompt`
+- `model`
+- `tools_json`
+- `docker_container`
+- `status`
+- `head_turn`
+- `created_at`
+- `updated_at`
+- `error_json`
+
+这个表保存的是任务元数据和最新状态摘要，不保存完整的逐轮 snapshot payload。
+
+### `task_checkpoints`
+
+每一行代表一个 checkpoint，当前主用途是 snapshot。
+
+字段包括：
+
+- `task_id`
+- `turn`
+- `phase`
 - `ts`
-- `payload`：msgspec JSON 序列化的 `AgentState`
+- `payload`
 
-## 快照（Snapshot）
+当前 `phase` 只有一个有效值：`"snapshot"`。
 
-### AgentState
+## 写入流程
 
-```python
-class AgentState(msgspec.Struct, frozen=True):
-    messages: tuple[yuullm.Message, ...]
-    total_usage: yuullm.Usage | None
-    total_cost_usd: float
-    rounds: int
-    conversation_id: str | None
-```
+当 `snapshot.enabled=true` 时，daemon 会创建 `TaskWriter`。
 
-- 每个快照是完整状态，不是增量
-- 所有 tool_call 均有配对的 tool result（no dangling calls）
-- 恢复时直接 `Agent(initial_messages=list(state.messages))`
+写入流程大致如下：
 
-### 写入时机
+1. `AgentManager` 在任务运行中调用 `_persist_snapshot(...)`
+2. 当前 session 通过 `Session.snapshot(...)` 生成 `AgentState`
+3. `AgentState` 被 JSON 编码成 checkpoint payload
+4. checkpoint 被送入 `TaskWriter` 的队列
+5. `TaskWriter` 批量写入 `task_checkpoints`
+6. 同时更新 `tasks.head_turn`、`tasks.status`、`tasks.updated_at`
 
-由宿主（`daemon/manager.py`）在 step 边界驱动：
+实现上是“批量缓冲 + 异步 flush”，不是每一步都同步写盘。
 
-```python
-async for _step in session.step_iter():
-    if not session.has_pending_background:
-        await self._persist_snapshot(session)
-```
+## 恢复流程
 
-- **正常 step 完成且无后台任务**：写入快照
-- **有后台任务运行时**：跳过快照（后台任务的中间态无法精确恢复，side effect 不可重放）
-- **CancelledError**：`kill()`（cancel 所有 bg tasks，合成 interrupted results 到 messages）→ 写快照
-- **Exception**：同 CancelledError，先 `kill()` 再写快照
+当 `snapshot.restore_on_start=true` 时，daemon 启动会调用恢复逻辑。
 
-### 批量写入
+恢复步骤是：
 
-`TaskWriter` 后台异步收集 checkpoint，按阈值批量 flush 到数据库：
+1. 从 `tasks` 里找状态仍处于 `running` 或 `blocked_on_input` 的任务
+2. 对每个任务读取最新的 snapshot checkpoint
+3. 如果没有 snapshot，就跳过这个任务
+4. 如果 snapshot 反序列化失败，也视为没有可恢复状态
+5. 有可恢复状态时，重建 `Session` 并恢复运行
 
-- `rows >= 200` 或 `bytes >= 1MB` 或 `elapsed >= 300ms`
-- 进程退出时必须 flush
-- 崩溃语义：允许丢失尚未 flush 的最后一小段 buffer
+恢复不是“重新发明一个新任务”，而是沿用原任务记录和 snapshot state。
 
-### 进程级崩溃
+## 当前实现的约束
 
-如果进程直接被 kill（kill -9、OOM），`_run` 的 try/except 不会执行，状态回退到最后一个已写入的快照。这是预期行为——后台任务运行期间的中间交互不可恢复。
+- snapshot 只负责恢复，不负责 tracing
+- snapshot payload 是 `AgentState` 的 JSON 编码
+- restore 只看最新的 `phase="snapshot"` checkpoint
+- 如果任务没有 snapshot，就不会被凭空构造出来
+- `tasks` 表里的 `docker_container` 会被带回恢复流程
+- 对于无效或过时的 snapshot，当前实现倾向于跳过，而不是强行继续
 
-## 加载
+## 和 daemon 的关系
 
-启动时从数据库加载未完成任务（status 为 `running` 或 `blocked_on_input`）。
+`AgentManager` 是 snapshot 持久化的调用方，`TaskPersistence` 只是存储层。
 
-1. 读取 `tasks` 表
-2. 读取 `task_checkpoints`，取最新的 `phase="snapshot"` 记录
-3. 反序列化 `AgentState`，用 `initial_messages` 恢复 Agent
+这意味着：
 
-### pending tools 恢复
+- persistence 层不决定什么时候 snapshot
+- persistence 层不决定如何组装 system prompt
+- persistence 层不决定 tool capability
+- persistence 层只负责存取任务元数据和 snapshot 数据
 
-加载时如果最后一个 turn 存在 `phase=llm` 的 delta checkpoint（遗留数据），且缺少对应的 `phase=tool` 记录，系统会补写一条 interrupted tool result（`ok=false, error.type="interrupted"`），然后将 status 改回 `running`。这保证 interrupted 只写入一次。
+## 设计动机
+
+这样拆分的好处是：
+
+- daemon 重启后可以恢复未完成任务
+- 任务状态和 snapshot payload 分层清楚
+- tracing 数据不会污染恢复逻辑
+- SQLite 结构简单，便于排障和迁移
+
+## 需要注意的点
+
+- `snapshot.enabled=true` 并不自动意味着一定能恢复，前提是之前确实写过 snapshot
+- `restore_on_start=true` 只是“尝试恢复”，不是保证所有任务都恢复成功
+- 更换数据库路径会让旧任务数据留在旧文件里，所以 `up` 会阻止直接切换
+- 如果你要做 schema 变更，优先考虑向后兼容，而不是重写整个任务表
+

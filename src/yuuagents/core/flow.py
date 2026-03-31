@@ -305,10 +305,13 @@ class Agent(Generic[Ctx]):
         self.flow = Flow(kind="agent")
         if startup_input is not None:
             self.startup_input = startup_input
-        if self.startup_input is None:
+        if self.startup_input is None and not self.initial_messages:
             raise RuntimeError("structured startup input is required")
-        self.flow.info["input_kind"] = self.startup_input.kind
-        self.flow.info["input_fields"] = agent_input_field_previews(self.startup_input)
+        if self.startup_input is not None:
+            self.flow.info["input_kind"] = self.startup_input.kind
+            self.flow.info["input_fields"] = agent_input_field_previews(
+                self.startup_input,
+            )
 
     def send(self, msg: yuullm.Message, *, defer_tools: bool = False) -> None:
         self.flow.send(msg)
@@ -420,15 +423,17 @@ class Agent(Generic[Ctx]):
         elif self.config.system:
             self.messages.append(yuullm.system(self.config.system))
 
-        if self.startup_input is None:
-            raise RuntimeError("structured startup input is required")
-        startup_messages = flatten_input_messages(self.startup_input)
-        self.flow.emit(
-            AgentInputEvent(
-                kind=self.startup_input.kind,
-                fields=agent_input_field_previews(self.startup_input),
+        startup_messages: list[yuullm.Message] = []
+        if self.startup_input is not None:
+            startup_messages = flatten_input_messages(self.startup_input)
+            self.flow.emit(
+                AgentInputEvent(
+                    kind=self.startup_input.kind,
+                    fields=agent_input_field_previews(self.startup_input),
+                )
             )
-        )
+        elif not self.initial_messages:
+            raise RuntimeError("structured startup input is required")
 
         if ytrace.is_initialized():
             chat = ytrace.start_conversation(

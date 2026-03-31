@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 
 import click
+import msgspec
 import yaml
 import yuullm
 
@@ -20,11 +21,10 @@ from yuuagents.config import (
     DEFAULT_CONFIG_PATH,
     YAGENTS_HOME,
     Config,
-    _PROJECT_CONFIG_NAME,
-    _PROJECT_OVERRIDES_NAME,
     _deep_merge,
-    find_project_root,
     load as load_config,
+    load_packaged_default_yaml,
+    load_yaml,
 )
 from typing import TYPE_CHECKING
 
@@ -44,6 +44,7 @@ _DOTENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Local config file names (looked up in cwd only).
 _LOCAL_CONFIG_NAME = "config.yaml"
 _LOCAL_OVERRIDES_NAME = "config.overrides.yaml"
+_DOCKER_TOOL_NAMES = {"execute_bash", "read_file", "edit_file", "delete_file"}
 
 
 def _local_config() -> Path | None:
@@ -87,6 +88,18 @@ def _load_dotenv_file(path: Path) -> None:
             value = value[1:-1]
         if key not in os.environ:
             os.environ[key] = value
+
+
+def _config_uses_docker_tools(cfg: Config) -> bool:
+    return any(
+        any(tool in _DOCKER_TOOL_NAMES for tool in agent.tools)
+        for agent in cfg.agents.values()
+    )
+
+
+def _agent_uses_docker_tools(cfg: Config, agent_name: str) -> bool:
+    entry = cfg.agents.get(agent_name)
+    return bool(entry and any(tool in _DOCKER_TOOL_NAMES for tool in entry.tools))
 
 
 def _socket(ctx: click.Context) -> str:
@@ -145,7 +158,7 @@ def cli(ctx: click.Context, socket: str | None) -> None:
     "--project-dir",
     default=None,
     type=click.Path(exists=True, file_okay=False),
-    help="Project root containing config.example.yaml (default: auto-detect)",
+    help="Optional project directory containing config.overrides.yaml",
 )
 @click.option(
     "-s",
@@ -166,9 +179,11 @@ def install(
 
     \b
     Config resolution order:
-      1. Start with defaults (config.example.yaml from project root).
-      2. If --overrides is given, deep-merge it on top.
-      3. If --config is given, it FULLY REPLACES the result (with confirmation).
+      1. Start with the bundled default template.
+      2. If `config.overrides.yaml` is present in the working directory or
+         `--project-dir`, deep-merge it on top.
+      3. If --overrides is given, deep-merge it on top.
+      4. If --config is given, it FULLY REPLACES the result (with confirmation).
 
     \b
     This command will:
@@ -182,6 +197,14 @@ def install(
     """
     total_steps = 5 if systemd else 4
     runtime_tag = _runtime_image_tag()
+    base_data = load_packaged_default_yaml()
+
+    def _overlay_if_exists(path: Path, *, label: str, data: dict[str, object]) -> dict[str, object]:
+        if path.is_file():
+            click.echo(f"{label}: {path}")
+            return _deep_merge(data, load_yaml(path))
+        return data
+
     # -- Step 0: resolve config sources --
     if config_path:
         # User provided a full config — requires confirmation
@@ -192,83 +215,43 @@ def install(
             sys.exit(0)
 
         user_config_p = Path(config_path)
-        user_data = yaml.safe_load(user_config_p.read_text(encoding="utf-8")) or {}
+        user_data = load_yaml(user_config_p)
 
         # Apply overrides on top if given
         if overrides_path:
             over_p = Path(overrides_path)
-            over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
+            over_data = load_yaml(over_p)
             user_data = _deep_merge(user_data, over_data)
             click.echo(f"Overrides:     {overrides_path}")
 
         merged_data = user_data
     else:
-        # --- Try cwd first: config.yaml / config.overrides.yaml ---
-        local_cfg = _local_config()
-        local_over = _local_overrides()
-
-        if local_cfg is not None:
-            click.echo(f"Found local:   {local_cfg}")
-            base_data = yaml.safe_load(local_cfg.read_text(encoding="utf-8")) or {}
-
-            if local_over is not None:
-                click.echo(f"Found local:   {local_over}")
-                over_data = yaml.safe_load(local_over.read_text(encoding="utf-8")) or {}
-                base_data = _deep_merge(base_data, over_data)
-
-            # Apply CLI --overrides on top
-            if overrides_path:
-                over_p = Path(overrides_path)
-                over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
-                base_data = _deep_merge(base_data, over_data)
-                click.echo(f"CLI overrides: {overrides_path}")
-
-            merged_data = base_data
-        else:
-            # Fallback: auto-detect project root for config.example.yaml
-            root: Path | None
-            if project_dir:
-                root = Path(project_dir)
-            else:
-                root = find_project_root()
-
-            if root is None or not (root / _PROJECT_CONFIG_NAME).exists():
-                click.echo(
-                    f"Error: cannot find {_LOCAL_CONFIG_NAME} in current directory "
-                    f"or {_PROJECT_CONFIG_NAME} in project root. "
-                    "Run this command from the project directory or pass --project-dir.",
-                    err=True,
-                )
-                sys.exit(1)
-            assert root is not None
-
-            base_path = root / _PROJECT_CONFIG_NAME
-            click.echo(f"Project root:  {root}")
-            click.echo(f"Base config:   {base_path}")
-
-            base_data = yaml.safe_load(base_path.read_text(encoding="utf-8")) or {}
-
-            # Check for project-level overrides
-            proj_overrides = root / _PROJECT_OVERRIDES_NAME
-            if proj_overrides.exists():
-                over_data = (
-                    yaml.safe_load(proj_overrides.read_text(encoding="utf-8")) or {}
-                )
-                base_data = _deep_merge(base_data, over_data)
-                click.echo(f"Overrides:     {proj_overrides}")
-            else:
-                click.echo(
-                    f"Overrides:     (none — {_PROJECT_OVERRIDES_NAME} not found)"
-                )
-
-            # Apply CLI --overrides on top
-            if overrides_path:
-                over_p = Path(overrides_path)
-                over_data = yaml.safe_load(over_p.read_text(encoding="utf-8")) or {}
-                base_data = _deep_merge(base_data, over_data)
-                click.echo(f"CLI overrides: {overrides_path}")
-
-            merged_data = base_data
+        merged_data = base_data
+        seen_paths: set[Path] = set()
+        for candidate, label in [
+            (Path.cwd() / _LOCAL_OVERRIDES_NAME, "Local overrides"),
+            (
+                Path(project_dir) / _LOCAL_OVERRIDES_NAME,
+                "Project overrides",
+            )
+            if project_dir
+            else (None, ""),
+        ]:
+            if candidate is None:
+                continue
+            resolved = candidate.resolve()
+            if resolved in seen_paths:
+                continue
+            seen_paths.add(resolved)
+            merged_data = _overlay_if_exists(
+                candidate,
+                label=label,
+                data=merged_data,
+            )
+        if overrides_path:
+            over_p = Path(overrides_path)
+            merged_data = _deep_merge(merged_data, load_yaml(over_p))
+            click.echo(f"CLI overrides: {overrides_path}")
 
     if not config_path:
         merged_data = _deep_merge(merged_data, {"docker": {"image": runtime_tag}})
@@ -324,56 +307,59 @@ def install(
     image = cfg.docker.image
     click.echo(f"  Image: {image}")
 
-    docker_ok, docker_detail = _docker_check()
-    if not docker_ok:
-        click.echo(
-            "  WARNING: Docker is not usable from this environment.\n"
-            f"  Details: {docker_detail}\n"
-            "  yagents requires a reachable Docker daemon.\n"
-            "  Install Docker Engine: https://docs.docker.com/engine/install/\n"
-            "  Common fixes:\n"
-            "    - Start the daemon: sudo systemctl start docker\n"
-            "    - Fix permissions: sudo usermod -aG docker $USER (then re-login)\n"
-            "    - If you use rootless Docker, ensure DOCKER_HOST is set correctly\n"
-            f"  Then run `docker pull {image}` manually if needed.",
-            err=True,
-        )
-    else:
-        if (
-            image == runtime_tag
-            or image.startswith("yuuagents-runtime:")
-            or image == "yuuagents-runtime"
-        ):
-            if _image_exists(image):
-                click.echo(f"  Image {image} already available locally.")
-            else:
-                click.echo(f"  Building {image} (this may take a minute) ...")
-                ok = _build_runtime_image(image)
-                if not ok:
-                    click.echo(
-                        f"  WARNING: Failed to build {image}. "
-                        "You can retry by re-running `yagents install`.",
-                        err=True,
-                    )
-                else:
-                    click.echo(f"  Image {image} built successfully.")
+    if _config_uses_docker_tools(cfg):
+        docker_ok, docker_detail = _docker_check()
+        if not docker_ok:
+            click.echo(
+                "  WARNING: Docker is not usable from this environment.\n"
+                f"  Details: {docker_detail}\n"
+                "  yagents requires a reachable Docker daemon for Docker-gated tools.\n"
+                "  Install Docker Engine: https://docs.docker.com/engine/install/\n"
+                "  Common fixes:\n"
+                "    - Start the daemon: sudo systemctl start docker\n"
+                "    - Fix permissions: sudo usermod -aG docker $USER (then re-login)\n"
+                "    - If you use rootless Docker, ensure DOCKER_HOST is set correctly\n"
+                f"  Then run `docker pull {image}` manually if needed.",
+                err=True,
+            )
         else:
-            if _image_exists(image):
-                click.echo(f"  Image {image} already available locally.")
-            else:
-                click.echo(f"  Pulling {image} (this may take a minute) ...")
-                result = subprocess.run(
-                    ["docker", "pull", image],
-                    capture_output=False,
-                )
-                if result.returncode != 0:
-                    click.echo(
-                        f"  WARNING: Failed to pull {image}. "
-                        f"You can retry with `docker pull {image}`.",
-                        err=True,
-                    )
+            if (
+                image == runtime_tag
+                or image.startswith("yuuagents-runtime:")
+                or image == "yuuagents-runtime"
+            ):
+                if _image_exists(image):
+                    click.echo(f"  Image {image} already available locally.")
                 else:
-                    click.echo(f"  Image {image} pulled successfully.")
+                    click.echo(f"  Building {image} (this may take a minute) ...")
+                    ok = _build_runtime_image(image)
+                    if not ok:
+                        click.echo(
+                            f"  WARNING: Failed to build {image}. "
+                            "You can retry by re-running `yagents install`.",
+                            err=True,
+                        )
+                    else:
+                        click.echo(f"  Image {image} built successfully.")
+            else:
+                if _image_exists(image):
+                    click.echo(f"  Image {image} already available locally.")
+                else:
+                    click.echo(f"  Pulling {image} (this may take a minute) ...")
+                    result = subprocess.run(
+                        ["docker", "pull", image],
+                        capture_output=False,
+                    )
+                    if result.returncode != 0:
+                        click.echo(
+                            f"  WARNING: Failed to pull {image}. "
+                            f"You can retry with `docker pull {image}`.",
+                            err=True,
+                        )
+                    else:
+                        click.echo(f"  Image {image} pulled successfully.")
+    else:
+        click.echo("  -> Skipped: no Docker-gated tools are configured.")
 
     if systemd:
         click.echo()
@@ -404,7 +390,7 @@ def install(
         click.echo(
             f"  1. Set your LLM API key:  export {first_provider.api_key_env}=sk-..."
         )
-        if _agent_uses_docker_tools(cfg, "main"):
+        if _config_uses_docker_tools(cfg):
             click.echo(
                 "  2. Optional: install Docker support or remove Docker tools from agents.main.tools"
             )
@@ -613,7 +599,7 @@ def _remove_yagents_containers() -> None:
         if result.returncode != 0:
             click.echo("  -> WARNING: could not list Docker containers.", err=True)
             return
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         click.echo("  -> Skipped (Docker not available).")
         return
 
@@ -727,6 +713,10 @@ def _agent_uses_docker_tools(cfg: Config, agent_name: str) -> bool:
     )
 
 
+def _config_uses_docker_tools(cfg: Config) -> bool:
+    return any(_agent_uses_docker_tools(cfg, agent_name) for agent_name in cfg.agents)
+
+
 # ── Configuration management ──
 
 
@@ -766,7 +756,11 @@ def config(
     # No arguments: print current config from daemon
     if not config_path and not overrides_path:
         try:
-            cfg = load_config()
+            cfg = (
+                load_config()
+                if DEFAULT_CONFIG_PATH.exists()
+                else msgspec.convert(load_packaged_default_yaml(), Config)
+            )
             config_dict = {
                 "db": {
                     "url": cfg.db.url,
@@ -775,6 +769,10 @@ def config(
                     "db_path": cfg.yuutrace.db_path,
                     "ui_port": cfg.yuutrace.ui_port,
                     "server_port": cfg.yuutrace.server_port,
+                },
+                "snapshot": {
+                    "enabled": cfg.snapshot.enabled,
+                    "restore_on_start": cfg.snapshot.restore_on_start,
                 },
                 "daemon": {
                     "socket": cfg.daemon.socket,
@@ -999,7 +997,7 @@ def up(
                 yaml.safe_load(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")) or {}
             )
         else:
-            base_data = {}
+            base_data = load_packaged_default_yaml()
 
         if local_over is not None:
             click.echo(f"Found local:   {local_over}")

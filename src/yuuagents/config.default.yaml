@@ -1,13 +1,12 @@
 # ============================================================================
-# yuuagents — Reference Configuration
+# yuuagents — Bundled Default Configuration
 # ============================================================================
 #
-# This repository template mirrors the bundled default config shipped inside
-# the package. `yagents install` uses the bundled template first and then
-# applies any local overrides.
+# This template is shipped inside the package and used by `yagents install`
+# when no project-local config is provided.
 #
-# Copy this file to `config.yaml` if you want to keep a repo-local baseline.
-# For packaged installs, use `config.overrides.yaml` or `--config` instead.
+# It is intentionally minimal and does not require Docker or web extras.
+# Copy it into ~/.yagents/config.yaml and edit it for your environment.
 # ============================================================================
 
 snapshot:

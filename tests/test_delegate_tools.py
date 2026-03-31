@@ -86,7 +86,6 @@ class _FakeManager:
                 tools=yt.ToolManager(),
                 llm=_make_llm("delegated done"),
                 system="delegate system",
-                max_steps=1,
             ),
             context=AgentContext(
                 task_id="child-task",

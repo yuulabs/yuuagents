@@ -32,8 +32,8 @@ from yuuagents.input import (
     agent_input_from_jsonable,
     agent_input_preview,
     agent_input_to_jsonable,
-    message_from_jsonable,
 )
+from yuuagents.core.flow import AgentState
 from yuuagents.types import AgentInfo, AgentStatus, ErrorInfo
 
 Phase = Literal["snapshot"]
@@ -102,7 +102,7 @@ class RestoredTask:
     status: AgentStatus
     created_at: datetime
     head_turn: int
-    history: list[Any]
+    state: AgentState | None
 
 
 @define
@@ -226,7 +226,12 @@ class TaskPersistence:
         row = await self.get_task_row(task_id)
         if row is None:
             raise KeyError(task_id)
+        state = await self.load_state(task_id)
+        if state is None:
+            return []
+        return list(state.messages)
 
+    async def load_state(self, task_id: str) -> AgentState | None:
         async with self._session()() as session:
             snapshot = (
                 await session.execute(
@@ -240,14 +245,11 @@ class TaskPersistence:
                 )
             ).scalar_one_or_none()
         if snapshot is None:
-            return []
-        payload = msgspec.json.decode(snapshot.payload)
-        if not isinstance(payload, dict):
-            return []
-        raw_messages = payload.get("messages", [])
-        if not isinstance(raw_messages, list):
-            return []
-        return [message_from_jsonable(message) for message in raw_messages]
+            return None
+        try:
+            return msgspec.json.decode(snapshot.payload, type=AgentState)
+        except msgspec.ValidationError:
+            return None
 
     async def load_unfinished(self) -> list[RestoredTask]:
         async with self._session()() as session:
@@ -271,7 +273,7 @@ class TaskPersistence:
         restored: list[RestoredTask] = []
         for r in rows:
             tools = msgspec.json.decode(r.tools_json, type=list[str])
-            history = await self.load_history(r.task_id)
+            state = await self.load_state(r.task_id)
             restored.append(
                 RestoredTask(
                     task_id=r.task_id,
@@ -285,7 +287,7 @@ class TaskPersistence:
                     status=AgentStatus(r.status),
                     created_at=r.created_at,
                     head_turn=r.head_turn,
-                    history=history,
+                    state=state,
                 )
             )
         return restored

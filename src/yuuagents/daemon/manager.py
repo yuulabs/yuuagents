@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from loguru import logger
 
@@ -24,7 +24,7 @@ from yuuagents.context import AgentContext
 from yuuagents.core.flow import render_agent_event
 from yuuagents.daemon.docker import DOCKER_SYSTEM_PROMPT
 from yuuagents.input import AgentInput
-from yuuagents.persistence import TaskPersistence, TaskWriter
+from yuuagents.persistence import RestoredTask, TaskPersistence, TaskWriter
 from yuuagents.prompts import get_vars as get_prompt_vars
 from yuuagents.runtime_session import Session
 from yuuagents.tools import get as get_builtin_tools
@@ -90,9 +90,11 @@ class AgentManager:
         db_url = self.db_url or self.config.db_url
         self._persistence = TaskPersistence(db_url=db_url)
         await self._persistence.start()
-        self._writer = TaskWriter(self._persistence)
-        await self._writer.start()
-        # Daemon crash = tasks lost; no restore on startup.
+        if self.config.snapshot.enabled:
+            self._writer = TaskWriter(self._persistence)
+            await self._writer.start()
+        if self.config.snapshot.restore_on_start:
+            await self._restore_unfinished_tasks()
 
     async def stop(self) -> None:
         for task in self._tasks.values():
@@ -105,7 +107,7 @@ class AgentManager:
         self._delegate_sessions_by_run_id.clear()
         if self._writer is not None:
             await self._writer.stop()
-            self._writer = None
+        self._writer = None
         if self._persistence is not None:
             await self._persistence.stop()
             self._persistence = None
@@ -298,9 +300,14 @@ class AgentManager:
         ids = ", ".join(run_ids)
         return f"Wait finished for runs: {ids}"
 
-    async def _run(self, session: Session, agent_input: AgentInput) -> None:
+    async def _run(
+        self,
+        session: Session,
+        agent_input: AgentInput | None,
+    ) -> None:
         session.status = AgentStatus.RUNNING
-        session.start(agent_input)
+        if agent_input is not None:
+            session.start(agent_input)
         try:
             async for _step in session.step_iter():
                 if not session.has_pending_background:
@@ -322,6 +329,67 @@ class AgentManager:
             await self._write_terminal(session.task_id, AgentStatus.ERROR, err_json)
             logger.exception("agent {agent_id} task {task_id} failed",
                              agent_id=session.agent_id, task_id=session.task_id)
+
+    async def _restore_unfinished_tasks(self) -> None:
+        if self._persistence is None:
+            return
+        restored_tasks = await self._persistence.load_unfinished()
+        for restored in restored_tasks:
+            if restored.state is None:
+                logger.warning(
+                    "Skipping restore for task {} because no snapshot was found",
+                    restored.task_id,
+                )
+                continue
+            session = await self._build_restored_session(restored)
+            self._sessions[restored.task_id] = session
+            self._contexts[restored.task_id] = session.context
+            self._snapshot_turn[restored.task_id] = restored.head_turn
+            self._tasks[restored.task_id] = asyncio.create_task(
+                self._run(session, None),
+            )
+
+    async def _build_restored_session(self, restored: RestoredTask) -> Session:
+        if restored.state is None:
+            raise ValueError("restored task requires a snapshot state")
+        req = TaskRequest(
+            agent=restored.agent_id,
+            persona="",
+            input=restored.input,
+            tools=list(restored.tools),
+            model=restored.model,
+            container=restored.docker_container,
+            image="",
+        )
+        session = await self._build_session(
+            task_id=restored.task_id,
+            req=req,
+            delegate_depth=0,
+            system_prompt_override=restored.system_prompt,
+            docker_capability=(
+                DockerCapability(
+                    executor=self.docker,
+                    container_id=restored.docker_container,
+                )
+                if restored.docker_container
+                else None
+            ),
+        )
+        conversation_id = restored.state.conversation_id
+        session.resume(
+            None,
+            history=list(restored.state.messages),
+            conversation_id=UUID(conversation_id) if conversation_id else None,
+            system=restored.system_prompt,
+        )
+        if session.agent is not None:
+            session.agent.rounds = restored.state.rounds
+            session.agent.total_usage = restored.state.total_usage
+            session.agent.total_cost_usd = restored.state.total_cost_usd
+        session.history = list(restored.state.messages)
+        session.status = restored.status
+        session.stored_steps = restored.state.rounds
+        return session
 
     async def list_agents(self) -> list[AgentInfo]:
         if self._persistence is None:
@@ -623,6 +691,7 @@ class AgentManager:
         delegate_depth: int,
         workdir: str = "",
         docker_capability: DockerCapability | None = None,
+        system_prompt_override: str | None = None,
     ) -> Session:
         """Build a Session for both root and child (delegate) use cases.
 
@@ -635,26 +704,27 @@ class AgentManager:
         tool_names = req.tools or self._default_tools(agent_id)
         tools = yt.ToolManager(get_builtin_tools(tool_names))
         needs_docker = self._needs_docker(tool_names)
-        persona_text = (
-            req.persona
-            or (agent_entry.persona if agent_entry and agent_entry.persona else "")
-            or agent_id
-        )
-        # Root sessions apply prompt variable substitution
-        if docker_capability is None:
-            prompt_vars = get_prompt_vars()
-            for key, value in prompt_vars.items():
-                persona_text = persona_text.replace(f"{{{key}}}", value)
-        agents_prompt = self._default_agents_prompt(agent_id=agent_id)
-        docker_prompt = DOCKER_SYSTEM_PROMPT if needs_docker else ""
-        system_prompt = _build_system_prompt(persona_text, agents_prompt, docker_prompt)
+        if system_prompt_override is not None:
+            system_prompt = system_prompt_override
+        else:
+            persona_text = (
+                req.persona
+                or (agent_entry.persona if agent_entry and agent_entry.persona else "")
+                or agent_id
+            )
+            # Root sessions apply prompt variable substitution
+            if docker_capability is None:
+                prompt_vars = get_prompt_vars()
+                for key, value in prompt_vars.items():
+                    persona_text = persona_text.replace(f"{{{key}}}", value)
+            agents_prompt = self._default_agents_prompt(agent_id=agent_id)
+            docker_prompt = DOCKER_SYSTEM_PROMPT if needs_docker else ""
+            system_prompt = _build_system_prompt(persona_text, agents_prompt, docker_prompt)
         config = AgentConfig(
             agent_id=agent_id,
             tools=tools,
             llm=llm_client,
             system=system_prompt,
-            soft_timeout=(agent_entry.soft_timeout or None) if agent_entry else None,
-            silence_timeout=(agent_entry.silence_timeout or None) if agent_entry else None,
         )
         # Resolve docker container for root, or reuse parent's for child.
         if needs_docker and docker_capability is None:

@@ -1,0 +1,81 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Distributions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Verify tag matches package version
+        env:
+          GIT_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import os
+          import pathlib
+          import tomllib
+
+          tag = os.environ["GIT_TAG"]
+          expected = tag.removeprefix("v")
+
+          pyproject = pathlib.Path("pyproject.toml")
+          data = tomllib.loads(pyproject.read_text())
+          version = data["project"]["version"]
+
+          if version != expected:
+              raise SystemExit(
+                  f"Tag {tag!r} does not match project.version {version!r}."
+              )
+
+          print(f"Publishing version {version} from tag {tag}.")
+          PY
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

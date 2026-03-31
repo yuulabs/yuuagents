@@ -102,7 +102,7 @@ def status() -> str:
             timeout=10,
         )
         return result.stdout or result.stderr or "unknown"
-    except FileNotFoundError, subprocess.TimeoutExpired:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return "systemctl not available"
 
 

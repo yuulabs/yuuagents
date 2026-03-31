@@ -19,7 +19,6 @@ _TOOL_IMPORTS = {
     "web_search": ("yuuagents.tools.web", "web_search"),
     "sleep": ("yuuagents.tools.control", "sleep"),
     "view_image": ("yuuagents.tools.view_image", "view_image"),
-    "update_todo": ("yuuagents.tools.todo", "update_todo"),
 }
 
 TOOL_NAMES = tuple(_TOOL_IMPORTS)
