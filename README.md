@@ -14,8 +14,8 @@ Agent = Persona + Tools + LLM
 
 | | SDK Path | Service Path |
 |---|---|---|
-| **When to use** | Embed in your code, notebooks, pipelines | Long-running tasks, background work, multi-agent |
-| **Entry point** | `from yuuagents import LocalAgent` | `yagents up` |
+| **When to use** | Embed in your code, notebooks, pipelines | Long-running tasks, managed lifecycle, CLI access |
+| **Entry point** | `from yuuagents import run_once, Session` | `yagents up` |
 | **Persistence** | No (ephemeral) | Yes (SQLite snapshots) |
 | **Docker tools** | No | Yes (optional) |
 | **Daemon required** | No | Yes |
@@ -103,8 +103,8 @@ print(result.output_text)
 ### Multi-agent (delegate tool)
 
 ```python
-from yuuagents import AgentConfig, AgentContext, Session, LocalAgentPool, LocalRun
-from yuuagents.input import conversation_input_from_text
+from yuuagents import AgentConfig, AgentContext, AgentPool, Session, LocalRun
+from yuuagents.input import AgentInput, conversation_input_from_text
 from yuuagents.tools import get as get_builtin_tools
 from uuid import uuid4
 import yuutools as yt
@@ -113,7 +113,25 @@ worker_config = AgentConfig(
     agent_id="worker", llm=llm, system="You are a specialist.",
     tools=yt.ToolManager(),
 )
-pool = LocalAgentPool(agents={"worker": worker_config})
+agent_configs = {"worker": worker_config}
+
+pool: AgentPool  # forward reference for session_builder closure
+
+async def session_builder(
+    *, parent: Session, task_id: str, parent_run_id: str,
+    agent: str, input: AgentInput, tools: list[str] | None, delegate_depth: int,
+) -> Session:
+    config = agent_configs[agent]
+    ctx = AgentContext(
+        task_id=task_id, agent_id=agent,
+        workdir=parent.context.workdir, pool=pool,
+        delegate_depth=delegate_depth,
+    )
+    session = Session(config=config, context=ctx)
+    session.start(input)
+    return session
+
+pool = AgentPool(session_builder=session_builder)
 
 orch_config = AgentConfig(
     agent_id="orchestrator", llm=llm, system="Delegate to worker.",
@@ -243,12 +261,12 @@ Snapshot-based recovery is configured under `snapshot:` in `config.yaml`.
 | `edit_file` | `docker` extra + Docker | Patch a file in the container workspace |
 | `delete_file` | `docker` extra + Docker | Delete a file from the container workspace |
 | `web_search` | `web` extra + Tavily API key | Search the web |
-| `delegate` | Daemon + delegate capability | Spawn a sub-agent |
-| `inspect_background` | Daemon | Inspect a deferred background task |
-| `cancel_background` | Daemon | Cancel a background task |
-| `input_background` | Daemon | Send input to a background task |
-| `defer_background` | Daemon | Move a tool call to background |
-| `wait_background` | Daemon | Block until a background task finishes |
+| `delegate` | `AgentPool` with `session_builder` | Spawn a sub-agent |
+| `inspect_background` | `AgentPool` | Inspect a running sub-agent or tool flow |
+| `cancel_background` | `AgentPool` | Cancel a running sub-agent or tool flow |
+| `input_background` | `AgentPool` | Send input to a background run |
+| `defer_background` | `AgentPool` | Signal a delegated agent to move work to background |
+| `wait_background` | `AgentPool` | Block until one or more background runs finish |
 
 ---
 
@@ -312,7 +330,7 @@ Config resolution order (highest wins):
 
 ```
   SDK path  ──────▶  Session / run_once()
-                     LocalAgentPool (multi-agent)
+                     AgentPool (multi-agent, session_builder)
                               │
                     ┌─────────▼───────────────────────────┐
                     │  core/flow.py                       │

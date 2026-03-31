@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`yuuagents/` is a standalone Python package in the workspace. Source code lives in `src/yuuagents/`, with core execution logic in `core/`, CLI entry points in `cli/`, daemon code in `daemon/`, built-in tools in `tools/`, and runtime/config types in files such as `agent.py`, `context.py`, `types.py`, and `init.py`. Tests live under `tests/`, examples under `examples/`, and repository-specific guidance is in `README.md`, `config.example.yaml`, and `design/`.
+`yuuagents/` is a standalone Python package in the workspace. Source code lives in `src/yuuagents/`, with core execution logic in `core/`, CLI entry points in `cli/`, daemon code in `daemon/`, built-in tools in `tools/`, and runtime/config types in files such as `agent.py`, `context.py`, `types.py`, and `init.py`. Session orchestration is centralised in `pool.py` (`AgentPool`), which is shared by both the SDK path and the daemon. Tests live under `tests/`, examples under `examples/`, and repository-specific guidance is in `README.md`, `config.example.yaml`, and `design/`.
 
 ## Build, Test, and Development Commands
 

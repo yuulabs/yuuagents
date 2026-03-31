@@ -40,6 +40,11 @@ CLI (click) ──HTTP/Unix socket──▶ Daemon (Starlette/uvicorn)
                                     ├── REST API (/api/agents/...)
                                     └── DockerManager (containers)
                                             │
+                                    AgentPool (pool.py)
+                                    ├── run() / spawn() / stop()
+                                    ├── inspect / cancel / defer / wait
+                                    └── persistence (snapshots)
+                                            │
                                     Agent Runtime
                                     ├── core/flow.py (Flow + Agent)
                                     └── Tools (DI via yuutools)
@@ -49,8 +54,9 @@ CLI (click) ──HTTP/Unix socket──▶ Daemon (Starlette/uvicorn)
 - `agent.py` — `AgentConfig` (frozen attrs) — immutable agent configuration
 - `core/flow.py` — `Flow` (observable, addressable, interruptible execution unit) + `Agent` (composes Flow with LLM behaviour). Everything that runs is a Flow: LLM, tool, bash, sub-agent. A Flow has stem (append-only event log), mailbox (async queue), and cancel.
 - `runtime_session.py` — `Session` — thin wrapper over Flow/Agent
+- `pool.py` — `AgentPool` — manages running sessions; `run()` launches tasks, `spawn()` creates child agents via a `session_builder` callable; also hosts background-control methods (inspect/cancel/defer/send_input/wait). Single pool shared by SDK and daemon.
 - `context.py` — `AgentContext` for dependency injection into tools
-- `persistence.py` — Append-only SQLite task log with deterministic replay
+- `persistence.py` — SQLite task log; snapshots `AgentState` after each turn; supports restore-on-start
 - `tools/` — Builtins (bash, file ops, web_search, delegate, etc.) using `yuutools` DI
 - `daemon/` — Server, API routes, AgentManager, DockerManager
 - `cli/` — Click commands as thin HTTP client
