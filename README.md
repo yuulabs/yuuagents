@@ -1,28 +1,30 @@
 # yuuagents
 
-`yuuagents` is a Python agent runtime with two supported paths:
+A minimal Python agent runtime. Write a one-liner or deploy a persistent daemon — same codebase, two paths.
 
-- SDK path: import `yuuagents`, build a local agent, and run it in-process.
-- Service path: install the package, run `yagents install`, then start the daemon with `yagents up`.
+```
+Agent = Persona + Tools + LLM
+```
 
-The base package includes:
+> **Quick links** · [SDK path](#sdk-path-local) · [Service path](#service-path-daemon) · [Flow concept](#the-flow-abstraction) · [Built-in tools](#built-in-tools) · [Config reference](#configuration)
 
-- `yagents` CLI
-- SDK helpers such as `run_once(...)`, `LocalAgent`, `Session`, `AgentConfig`, and `AgentContext`
-- built-in tool registry and capability guards
-- snapshot-based task persistence
-- optional Docker-backed and web-backed capabilities
+---
+
+## Two Ways to Run
+
+| | SDK Path | Service Path |
+|---|---|---|
+| **When to use** | Embed in your code, notebooks, pipelines | Long-running tasks, background work, multi-agent |
+| **Entry point** | `from yuuagents import LocalAgent` | `yagents up` |
+| **Persistence** | No (ephemeral) | Yes (SQLite snapshots) |
+| **Docker tools** | No | Yes (optional) |
+| **Daemon required** | No | Yes |
+
+---
 
 ## Install
 
-Requirements:
-
-- Python 3.14 or newer
-- `pip` or `uv`
-- For service mode, a working `ytrace` executable on `PATH`
-- For Docker-backed tools, Docker Engine must be reachable
-
-Install the base package:
+**Requirements:** Python 3.14+, and optionally Docker Engine for sandboxed tool execution.
 
 ```bash
 pip install yuuagents
@@ -31,152 +33,276 @@ pip install yuuagents
 Optional extras:
 
 ```bash
-pip install 'yuuagents[docker]'
-pip install 'yuuagents[web]'
-pip install 'yuuagents[docker,web]'
-pip install 'yuuagents[all]'
+pip install 'yuuagents[docker]'   # execute_bash, read_file, edit_file, delete_file
+pip install 'yuuagents[web]'      # web_search (requires Tavily API key)
+pip install 'yuuagents[all]'      # everything
 ```
 
-Extra meanings:
+---
 
-- `docker`: enables Docker-backed `execute_bash`, `read_file`, `edit_file`, and `delete_file`
-- `web`: enables `web_search`
-- `all`: installs both optional capability sets
+## SDK Path (Local)
 
-## SDK Path
+Run an agent in-process. No daemon, no Docker, no database.
 
-Use the SDK path when you want to run an agent locally inside your own process.
+### 30-second quickstart
 
 ```python
 import asyncio
-
 import yuullm
-from yuuagents import LocalAgent, run_once
+from yuuagents import run_once
 
-
-async def main() -> None:
+async def main():
     llm = yuullm.YLLMClient(
         provider="openai",
         api_key_env="OPENAI_API_KEY",
         default_model="gpt-4o-mini",
     )
-
-    result = await run_once(
-        "Say hello and report that the runtime is working.",
-        llm=llm,
-        system="You are a concise coding assistant.",
-    )
-
+    result = await run_once("Summarise the Zen of Python.", llm=llm)
     print(result.output_text)
-
-    agent = LocalAgent.create(llm=llm)
-    run = agent.start("Inspect the current workspace")
-    async for step in run.step_iter():
-        print(step)
-    print((await run.result()).output_text)
-
 
 asyncio.run(main())
 ```
 
-SDK mode does not require the daemon, Docker, or a local SQLite task database.
+### Stateful agent with streaming
 
-## Service Path
+```python
+from yuuagents import LocalAgent
 
-Service mode is the CLI-and-daemon workflow.
+agent = LocalAgent.create(llm=llm, system="You are a concise coding assistant.")
 
-### `yagents install`
+run = agent.start("List the files in the current directory.")
+async for step in run.step_iter():
+    print(f"round {step.rounds}  tokens={step.tokens}")
 
-`yagents install` writes the installed config to `~/.yagents/config.yaml`, creates the runtime directories, initializes the task database, and prepares the configured Docker image when Docker-gated tools are present.
+result = await run.result()
+print(result.output_text)
+```
 
-Current config resolution order:
+### With custom tools
 
-1. Start from the bundled default template shipped inside the package.
-2. Merge `config.overrides.yaml` from the current working directory if present.
-3. Merge `config.overrides.yaml` from `--project-dir` if provided.
-4. Merge `--overrides` if provided.
-5. If `--config` is provided, it fully replaces the default template and requires confirmation before continuing.
+```python
+import yuutools as yt
+from yuuagents import LocalAgent
 
-Important details:
+@yt.tool(description="Return the current UTC time.")
+async def now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
-- The packaged default template is used even when you do not have a repository checkout.
-- On the default install path, `docker.image` is pinned to the versioned runtime image tag for the installed package.
-- If no Docker-gated tools are configured, Docker image setup is skipped.
-- If Docker-gated tools are configured but Docker is unavailable, install continues with a warning and those tools will fail later at runtime.
+agent = LocalAgent.create(
+    llm=llm,
+    tools=yt.ToolManager([now]),
+)
+run = agent.start("What time is it?")
+print((await run.result()).output_text)
+```
 
-### `yagents up`
+---
 
-`yagents up` starts the daemon on the Unix socket from the resolved config.
+## Service Path (Daemon)
 
-Behavior to know:
+The daemon manages long-running tasks over a Unix socket, persists snapshots to SQLite, and optionally runs tools inside Docker containers.
 
-- `--config` loads a specific config file.
-- Without `--config`, the CLI prefers `cwd/config.yaml`, then `~/.yagents/config.yaml`, then the bundled default template.
-- `config.overrides.yaml` in the current directory is merged on top when present.
-- `--dot-env` loads environment variables from a `.env` file; otherwise the command auto-discovers `.env` while walking up from the current directory toward `$HOME`.
-- If the configured database path changed since the last install, `up` refuses to start rather than orphan the old SQLite file.
-- `-d/--daemon` prefers a systemd user service when possible; otherwise it falls back to a background subprocess.
+### Step 1 — Bootstrap
 
-### Other CLI commands
+```bash
+yagents install
+```
 
-| Command | What it does |
+Writes `~/.yagents/config.yaml`, initialises the task database, and pulls the Docker runtime image (if Docker-backed tools are configured).
+
+### Step 2 — Start
+
+```bash
+yagents up -d        # background process or systemd user service
+```
+
+### Step 3 — Run tasks
+
+```bash
+# Submit a task
+yagents run --agent main --task "Refactor src/util.py to use pathlib"
+
+# Check status
+yagents list
+yagents status <task_id>
+
+# Read the output
+yagents logs <task_id>
+
+# Send a follow-up message to a running task
+yagents input <task_id> "Focus on the read_text calls first."
+
+# Cancel
+yagents stop <task_id>
+```
+
+### Full CLI reference
+
+| Command | Description |
 |---|---|
-| `yagents run --agent main --task "..."` | Submit a task to the daemon |
-| `yagents list` | Show a human-readable task list |
-| `yagents status <task_id>` | Return JSON status for one task |
-| `yagents logs <task_id>` | Print conversation history by role |
-| `yagents input <task_id> "..."` | Send a user message to a running task |
+| `yagents install` | Bootstrap config, directories, database, Docker image |
+| `yagents up [-d]` | Start daemon (`-d` = background / systemd) |
+| `yagents down` | Stop daemon |
+| `yagents run --agent <id> --task "..."` | Submit a task |
+| `yagents list` | Human-readable task list |
+| `yagents status <task_id>` | JSON status for one task |
+| `yagents logs <task_id>` | Conversation history by role |
+| `yagents input <task_id> "..."` | Send a message to a running task |
 | `yagents stop <task_id>` | Cancel a running task |
-| `yagents config` | Show the current installed config |
-| `yagents config --overrides FILE` | Update config and try hot reload |
-| `yagents config --config FILE` | Replace config and try hot reload |
-| `yagents trace ui` | Open the yuutrace UI |
-| `yagents down` | Stop the daemon and try to stop the systemd user service |
-| `yagents uninstall` | Remove the installed runtime state |
+| `yagents config` | Show current resolved config |
+| `yagents config --overrides FILE` | Merge overrides and hot-reload |
+| `yagents config --config FILE` | Replace config and hot-reload |
+| `yagents trace ui` | Open the yuutrace observability UI |
+| `yagents uninstall` | Remove all installed runtime state |
 
-`yagents run` accepts `--persona`, `--tools`, `--model`, `--container`, and `--image`. `--container` and `--image` are mutually exclusive.
+`yagents run` also accepts `--persona`, `--tools`, `--model`, `--container`, `--image`.
+
+---
+
+## The Flow Abstraction
+
+Everything that executes inside yuuagents is a **Flow** — a generic container that is observable, addressable, and cancellable.
+
+```
+Flow
+├── stem          append-only event log   (what happened)
+├── mailbox       async message queue     (what to do next)
+├── children      list[Flow]              (spawned sub-flows)
+└── cancel()      propagates recursively  (stop everything)
+```
+
+An **Agent** is a specialised Flow that drives the LLM turn loop:
+
+```
+Agent (a Flow)
+├── AgentConfig   llm + tools + system prompt   (frozen, immutable)
+├── messages      conversation history
+└── steps()       AsyncGenerator[StepResult]    (call this to run)
+```
+
+At each turn, `steps()`:
+1. Calls the LLM (streaming)
+2. Executes any tool calls (optionally in Docker, optionally deferred to background)
+3. Emits a `StepResult` and loops until the model stops
+
+Sub-agents spawned via the `delegate` tool become **child Flows** of the parent — inheriting cancellation and sharing the observable event tree.
+
+### Snapshots
+
+A Flow can be frozen into an `AgentState` at any point:
+
+```python
+state = await session.snapshot()   # messages + usage + rounds
+# ... persist to disk, restart daemon, restore ...
+session.resume(history=state.messages, conversation_id=state.conversation_id)
+```
+
+Snapshot-based recovery is configured under `snapshot:` in `config.yaml`.
+
+---
 
 ## Built-in Tools
 
-Available tool names in the package:
+| Tool | Requires | Description |
+|---|---|---|
+| `sleep` | — | Pause execution |
+| `view_image` | — | Decode and display an image |
+| `execute_bash` | `docker` extra + Docker | Run shell commands in a container |
+| `read_file` | `docker` extra + Docker | Read a file from the container workspace |
+| `edit_file` | `docker` extra + Docker | Patch a file in the container workspace |
+| `delete_file` | `docker` extra + Docker | Delete a file from the container workspace |
+| `web_search` | `web` extra + Tavily API key | Search the web |
+| `delegate` | Daemon + delegate capability | Spawn a sub-agent |
+| `inspect_background` | Daemon | Inspect a deferred background task |
+| `cancel_background` | Daemon | Cancel a background task |
+| `input_background` | Daemon | Send input to a background task |
+| `defer_background` | Daemon | Move a tool call to background |
+| `wait_background` | Daemon | Block until a background task finishes |
 
-- `sleep`
-- `view_image`
-- `delegate`
-- `inspect_background`
-- `cancel_background`
-- `input_background`
-- `defer_background`
-- `wait_background`
-- `execute_bash`
-- `read_file`
-- `edit_file`
-- `delete_file`
-- `web_search`
-
-Capability rules:
-
-- `sleep` and `view_image` are always available.
-- `delegate` and the background control tools require delegate capability from the daemon runtime.
-- Docker-backed tools require Docker capability and the `docker` extra.
-- `web_search` requires web capability, the `web` extra, and a Tavily API key.
+---
 
 ## Configuration
 
-The repository contains source-side reference templates:
+State lives under `~/.yagents/` by default:
 
-- `config.example.yaml`
-- `config.overrides.example.yaml`
+```
+~/.yagents/
+├── config.yaml         active config
+├── tasks.sqlite3       task log and snapshots
+├── traces.db           LLM traces (yuutrace)
+├── yagents.sock        Unix socket
+└── dockers/            per-container working directories
+```
 
-Those files are reference material for source checkouts. Packaged installs use the bundled default template shipped inside `yuuagents` itself.
+Key sections in `config.yaml`:
 
-Persistent state lives under `~/.yagents` by default:
+```yaml
+snapshot:
+  enabled: false           # write AgentState snapshots after each turn
+  restore_on_start: false  # auto-resume incomplete tasks on daemon startup
 
-- `~/.yagents/config.yaml`
-- `~/.yagents/tasks.sqlite3`
-- `~/.yagents/traces.db`
-- `~/.yagents/yagents.sock`
-- `~/.yagents/dockers/`
+daemon:
+  socket: ~/.yagents/yagents.sock
+  log_level: info
+
+docker:
+  image: yuuagents-runtime:latest
+
+providers:
+  openai-default:
+    api_type: openai-chat-completion
+    api_key_env: OPENAI_API_KEY
+    default_model: gpt-4o
+
+agents:
+  main:
+    description: Default general-purpose agent.
+    provider: openai-default
+    model: gpt-4o
+    persona: "You are a careful, concise assistant."
+    tools:
+      - sleep
+      - view_image
+```
+
+Copy `config.example.yaml` and `config.overrides.example.yaml` from the source repo for the full annotated reference.
+
+Config resolution order (highest wins):
+
+1. Bundled package default template
+2. `config.overrides.yaml` in the current working directory
+3. `config.overrides.yaml` from `--project-dir`
+4. `--overrides FILE` flag
+5. `--config FILE` flag (replaces the default template entirely)
+
+---
+
+## Architecture Overview
+
+```
+                    ┌─────────────────────────────────────┐
+  SDK path  ──────▶ │  LocalAgent / run_once()            │
+                    │  (in-process, no daemon required)   │
+                    └──────────────┬──────────────────────┘
+                                   │
+                    ┌──────────────▼──────────────────────┐
+                    │  core/flow.py                       │
+                    │  Flow  ◀──── Agent                  │
+                    │  (observable · addressable ·        │
+                    │   interruptible execution unit)     │
+                    └──────────────┬──────────────────────┘
+                                   │
+  Service   ┌────────────────────┐ │ ┌──────────────────────┐
+  path  ───▶│  CLI (yagents)     │─┼─│  Daemon (Starlette)  │
+            │  click commands    │ │ │  AgentManager        │
+            │  HTTP/Unix socket  │ │ │  DockerManager       │
+            └────────────────────┘   └──────────────────────┘
+```
+
+**Package dependencies:** `yuubot → yuuagents → {yuullm, yuutools, yuutrace}`
+
+---
 
 ## Development
 
@@ -184,5 +310,8 @@ Persistent state lives under `~/.yagents` by default:
 uv sync
 uv run pytest
 uv run ruff check src/ tests/
+uv run mypy src/
 uv build
 ```
+
+Tests marked `@pytest.mark.live` require real external services and are skipped by default.
