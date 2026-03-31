@@ -8,8 +8,8 @@ import yuutools as yt
 
 from yuuagents.agent import AgentConfig
 from yuuagents.context import AgentContext
-from yuuagents.input import ConversationInput, conversation_input_from_text
-from yuuagents.local import LocalRun, run_once
+from yuuagents.input import conversation_input_from_text
+from yuuagents.local import final_response, run_once
 from yuuagents.runtime_session import Session
 
 
@@ -50,32 +50,26 @@ def make_client(script: Sequence[Sequence[yuullm.StreamItem]]) -> yuullm.YLLMCli
 
 
 @pytest.mark.asyncio
-async def test_run_once_builds_local_session_automatically(tmp_path) -> None:
+async def test_run_once_returns_completed_session(tmp_path) -> None:
     client = make_client(
         [[yuullm.Response(item={"type": "text", "text": "done"})]]
     )
 
-    result = await run_once(
+    session = await run_once(
         "say hi",
         llm=client,
         system="you are helpful",
         workdir=str(tmp_path),
     )
 
-    assert result.output_text == "done"
-    assert result.session.agent_id == "local"
-    assert result.session.context.workdir == str(tmp_path)
-    assert result.session.context.capabilities.docker is None
-    assert isinstance(result.input, ConversationInput)
-    assert result.input.messages == [yuullm.user("say hi")]
-    assert result.messages[-1] == (
-        "assistant",
-        [{"type": "text", "text": "done"}],
-    )
+    assert session.agent_id == "local"
+    assert session.context.workdir == str(tmp_path)
+    assert final_response(session.history) == "done"
+    assert session.history[-1] == ("assistant", [{"type": "text", "text": "done"}])
 
 
 @pytest.mark.asyncio
-async def test_local_run_step_iter_exposes_progress_and_final_result(tmp_path) -> None:
+async def test_step_iter_delta_carries_new_messages(tmp_path) -> None:
     client = make_client(
         [
             [yuullm.ToolCall(id="call-1", name="noop", arguments="{}")],
@@ -91,38 +85,31 @@ async def test_local_run_step_iter_exposes_progress_and_final_result(tmp_path) -
         agent_id="sdk-agent",
         tools=yt.ToolManager([noop]),
         llm=client,
-        system="test system",
+        system="",
     )
     ctx = AgentContext(task_id="test-task", agent_id="sdk-agent", workdir=str(tmp_path))
     session = Session(config=config, context=ctx)
-    agent_input = conversation_input_from_text("do work")
-    session.start(agent_input)
-    run = LocalRun(session=session, input=agent_input)
+    session.start(conversation_input_from_text("do work"))
 
-    steps = [step async for step in run.step_iter()]
-    result = await run.result()
+    steps = [step async for step in session.step_iter()]
 
     assert [step.done for step in steps] == [False, True]
-    assert result.output_text == "finished"
-    assert result.steps == tuple(steps)
-    assert result.session.agent_id == "sdk-agent"
-    assert result.session.context.workdir == str(tmp_path)
+    # round 1: assistant tool-call message + tool result
+    assert steps[0].delta[0][0] == "assistant"
+    assert steps[0].delta[1][0] == "tool"
+    # round 2: final assistant text
+    assert steps[1].delta[0] == ("assistant", [{"type": "text", "text": "finished"}])
+    assert final_response(session.history) == "finished"
 
 
-@pytest.mark.asyncio
-async def test_local_run_requires_step_iter_to_finish_before_result() -> None:
-    client = make_client(
-        [[yuullm.Response(item={"type": "text", "text": "hello"})]]
-    )
-    config = AgentConfig(agent_id="local", tools=yt.ToolManager(), llm=client, system="")
-    ctx = AgentContext(task_id="test", agent_id="local", workdir=".")
-    session = Session(config=config, context=ctx)
-    agent_input = conversation_input_from_text("hello")
-    session.start(agent_input)
-    run = LocalRun(session=session, input=agent_input)
+def test_final_response_returns_empty_for_no_history() -> None:
+    assert final_response([]) == ""
 
-    iterator = run.step_iter()
-    await anext(iterator)
 
-    with pytest.raises(RuntimeError, match="exhaust it before calling result"):
-        await run.result()
+def test_final_response_skips_non_assistant_messages() -> None:
+    messages: list[yuullm.Message] = [
+        yuullm.user("hello"),
+        yuullm.assistant({"type": "text", "text": "hi"}),
+        yuullm.user("ok"),
+    ]
+    assert final_response(messages) == "hi"

@@ -19,6 +19,7 @@ class StepResult:
     done: bool          # True = LLM finished naturally (no tool calls)
     tokens: int = 0     # cumulative total tokens so far
     rounds: int = 0     # cumulative LLM rounds so far
+    delta: tuple[yuullm.Message, ...] = ()  # messages appended this step
 
 
 class AgentStatus(str, enum.Enum):
