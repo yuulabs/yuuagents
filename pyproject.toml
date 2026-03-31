@@ -3,12 +3,15 @@ name = "yuuagents"
 version = "0.1.1"
 description = "Agent runtime with SDK imports, bundled CLI, optional daemon bootstrap, and built-in tools"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Tomorrowdawn", email = "tomorrowdawn@mail.ustc.edu.cn" }
 ]
 requires-python = ">=3.14"
 keywords = ["agents", "llm", "runtime", "cli", "sdk"]
 classifiers = [
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
     "Intended Audience :: Developers",
