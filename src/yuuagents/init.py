@@ -14,27 +14,32 @@ CLI commands like ``yagents list`` / ``yagents status`` work immediately.
 
 from __future__ import annotations
 
+from importlib import import_module
 import importlib.metadata
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-import yaml
-from loguru import logger
-
-from yuuagents.config import (
-    YAGENTS_HOME,
-    DEFAULT_CONFIG_PATH,
-    Config,
-    load as load_config,
-)
-from yuuagents.persistence import TaskPersistence
+from yuuagents.service_requirements import service_dependency_message
 
 if TYPE_CHECKING:
-    pass
+    from yuuagents.config import Config
+
+
+def _load_service_runtime() -> tuple[Any, Any, Any, Any]:
+    try:
+        config_module = import_module("yuuagents.config")
+        yaml_module = import_module("yaml")
+        logger = import_module("loguru").logger
+        task_persistence = import_module("yuuagents.persistence").TaskPersistence
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            service_dependency_message("yuuagents.init.setup()", exc)
+        ) from exc
+    return config_module, yaml_module, logger, task_persistence
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +180,13 @@ async def setup(config: str | Path | Config) -> Config:
     exist, database tables exist, image already built, daemon already
     running).
     """
+    config_module, yaml_module, logger, task_persistence = _load_service_runtime()
+
     # -- resolve config --
     config_file_path: Path | None = None
     if isinstance(config, (str, Path)):
         config_file_path = Path(config).expanduser().resolve()
-        cfg = load_config(config_file_path)
+        cfg = config_module.load(config_file_path)
     else:
         cfg = config
 
@@ -191,8 +198,8 @@ async def setup(config: str | Path | Config) -> Config:
 
     # -- Step 1: create directories --
     logger.info("Creating directories ...")
-    YAGENTS_HOME.mkdir(parents=True, exist_ok=True)
-    (YAGENTS_HOME / "dockers").mkdir(exist_ok=True)
+    config_module.YAGENTS_HOME.mkdir(parents=True, exist_ok=True)
+    (config_module.YAGENTS_HOME / "dockers").mkdir(exist_ok=True)
 
     db_path = cfg.sqlite_path
     if db_path is not None:
@@ -203,15 +210,15 @@ async def setup(config: str | Path | Config) -> Config:
     import json
 
     config_data = json.loads(msgspec.json.encode(cfg))
-    DEFAULT_CONFIG_PATH.write_text(
-        yaml.dump(config_data, default_flow_style=False, allow_unicode=True),
+    config_module.DEFAULT_CONFIG_PATH.write_text(
+        yaml_module.dump(config_data, default_flow_style=False, allow_unicode=True),
         encoding="utf-8",
     )
-    logger.info("Config written to {}", DEFAULT_CONFIG_PATH)
+    logger.info("Config written to {}", config_module.DEFAULT_CONFIG_PATH)
 
     # -- Step 3: initialize database --
     logger.info("Initializing database ...")
-    persistence = TaskPersistence(db_url=cfg.db_url)
+    persistence = task_persistence(db_url=cfg.db_url)
     await persistence.start()
     await persistence.stop()
     logger.info("Database ready.")

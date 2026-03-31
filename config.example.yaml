@@ -2,12 +2,14 @@
 # yagents — Default Configuration
 # ============================================================================
 #
-# This is the reference configuration with all available options and their
-# default values.  Run `yagents setup` to install it to ~/.yagents/config.yaml.
+# This is the repository reference configuration with all available options
+# and their default values. It is not bundled into the installed package.
+# Copy it, edit it for your host environment, then run `yagents install`
+# or `yagents install --config /path/to/config.yaml`.
 #
 # To customise settings without editing this file, create a
 # `config.overrides.yaml` next to this file (in the project root) and run
-# `yagents setup` again — overrides are deep-merged on top of the defaults.
+# `yagents install` again — overrides are deep-merged on top of the defaults.
 #
 # Runtime config location:  ~/.yagents/config.yaml
 # ============================================================================
@@ -44,7 +46,7 @@ daemon:
 # Prerequisites:
 #   1. Install Docker Engine — https://docs.docker.com/engine/install/
 #   2. Ensure your user is in the `docker` group (or use rootless Docker).
-#   3. Run `yagents setup` to pull the default image automatically.
+#   3. Run `yagents install` to build or pull the default image automatically.
 
 docker:
   # Default Docker image for agent containers.

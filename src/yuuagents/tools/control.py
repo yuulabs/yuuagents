@@ -6,7 +6,7 @@ import asyncio
 
 import yuutools as yt
 
-from yuuagents.context import DelegateManager
+from yuuagents.capabilities import DelegateManager, require_delegate_manager
 from yuuagents.runtime_session import Session
 
 
@@ -40,11 +40,11 @@ async def inspect_background(
     run_id: str,
     limit: int = 200,
     max_chars: int = 4000,
-    manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
+    manager: DelegateManager = yt.depends(require_delegate_manager),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
-    if manager is None or parent is None:
-        return "[ERROR] background run manager unavailable"
+    if parent is None:
+        raise RuntimeError("background tools require an active session")
     return manager.inspect_run(
         parent=parent,
         run_id=run_id,
@@ -61,11 +61,11 @@ async def inspect_background(
 )
 async def cancel_background(
     run_id: str,
-    manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
+    manager: DelegateManager = yt.depends(require_delegate_manager),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
-    if manager is None or parent is None:
-        return "[ERROR] background run manager unavailable"
+    if parent is None:
+        raise RuntimeError("background tools require an active session")
     return manager.cancel_run(parent=parent, run_id=run_id)
 
 
@@ -87,11 +87,11 @@ async def input_background(
     run_id: str,
     data: str,
     append_newline: bool = True,
-    manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
+    manager: DelegateManager = yt.depends(require_delegate_manager),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
-    if manager is None or parent is None:
-        return "[ERROR] background run manager unavailable"
+    if parent is None:
+        raise RuntimeError("background tools require an active session")
     return await manager.input_run(
         parent=parent,
         run_id=run_id,
@@ -116,11 +116,11 @@ async def input_background(
 async def defer_background(
     run_id: str,
     message: str = "",
-    manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
+    manager: DelegateManager = yt.depends(require_delegate_manager),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
-    if manager is None or parent is None:
-        return "[ERROR] background run manager unavailable"
+    if parent is None:
+        raise RuntimeError("background tools require an active session")
     return manager.defer_run(parent=parent, run_id=run_id, message=message)
 
 
@@ -135,9 +135,9 @@ async def defer_background(
 )
 async def wait_background(
     run_ids: list[str],
-    manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
+    manager: DelegateManager = yt.depends(require_delegate_manager),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
-    if manager is None or parent is None:
-        return "[ERROR] background run manager unavailable"
+    if parent is None:
+        raise RuntimeError("background tools require an active session")
     return await manager.wait_runs(parent=parent, run_ids=run_ids)

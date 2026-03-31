@@ -1,147 +1,33 @@
-# AGENTS.md — yuuagents Development Guide
+# Repository Guidelines
 
-## Build & Development Commands
+## Project Structure & Module Organization
+
+`yuuagents/` is a standalone Python package in the workspace. Source code lives in `src/yuuagents/`, with core execution logic in `core/`, CLI entry points in `cli/`, daemon code in `daemon/`, built-in tools in `tools/`, and runtime/config types in files such as `agent.py`, `context.py`, `types.py`, and `init.py`. Tests live under `tests/`, examples under `examples/`, and repository-specific guidance is in `README.md`, `config.example.yaml`, and `design/`.
+
+## Build, Test, and Development Commands
+
+Use `uv` for all local work:
 
 ```bash
-# Install dependencies (uses uv)
 uv sync
-
-# Run the daemon
-uv run yagents start
-
-# Submit a task
-uv run yagents run --persona "coder" --task "hello world"
-
-# Lint and format code (ruff)
-uv run ruff check src/
-uv run ruff check --fix src/
-uv run ruff format src/
-
-# Type checking (if mypy is configured)
-uv run mypy src/
-
-# Run all tests
-uv run pytest
-
-# Run a single test file
-uv run pytest tests/test_agent.py
-
-# Run a single test function
-uv run pytest tests/test_agent.py::test_agent_setup -v
-
-# Build package
-uv build
+cd yuuagents && uv run pytest
+cd yuuagents && uv run pytest tests/test_flow.py -v
+cd yuuagents && uv run ruff check src/ tests/
+cd yuuagents && uv run ruff format src/ tests/
+cd yuuagents && uv run mypy src/
+cd yuuagents && uv build
 ```
 
-## Code Style Guidelines
+The CLI entry point is `yagents`. Common commands include `uv run yagents up`, `uv run yagents run --agent main --task "..."`, `uv run yagents list`, and `uv run yagents down`.
 
-### Python Version & Imports
-- Target Python 3.14+
-- Always start with `from __future__ import annotations` for PEP 563 postponed annotations
-- Import order: stdlib → third-party → local (yuuagents, yuutools, etc.)
-- Use `TYPE_CHECKING` for imports that would cause circular dependencies
+## Coding Style & Naming Conventions
 
-### Type Hints
-- Use modern Python 3.10+ syntax: `str | None` not `Optional[str]`
-- Use `list[str]` not `List[str]`, `dict[str, int]` not `Dict[str, int]`
-- Return type `-> None` for functions that don't return meaningful values
-- Type all function parameters and return values
+Target Python 3.14+, use 4-space indentation, and prefer `from __future__ import annotations` in new modules. Keep imports ordered `stdlib -> third-party -> local`. Use `snake_case` for modules, functions, and variables; `PascalCase` for classes; and `UPPER_SNAKE_CASE` for constants. Favor `attrs` for mutable runtime objects, `msgspec.Struct` for typed payloads, and explicit async APIs for I/O and agent execution.
 
-### Naming Conventions
-- **Modules**: snake_case (`agent.py`, `bash.py`)
-- **Classes**: PascalCase (`Agent`, `AgentConfig`, `TaskRequest`)
-- **Functions/variables**: snake_case (`execute_bash`, `agent_id`)
-- **Constants**: UPPER_CASE with underscores (`_DEFAULT_SOCKET`, _FRONTMATTER_RE`)
-- **Private**: Leading underscore for internal use (`_step`, `_shutdown`)
-- **Type variables**: PascalCase if exposed
+## Testing Guidelines
 
-### Data Classes
-- Use `@define` from `attrs` for mutable domain objects
-- Use `msgspec.Struct` with `frozen=True, kw_only=True` for API DTOs
-- Use `field(factory=...)` for mutable default values
+This repo uses `pytest` with `pytest-asyncio`. Name tests `tests/test_*.py` and keep coverage close to the code you change. Mock external systems such as Docker, LLM providers, and network calls in unit tests; reserve live integration checks for cases that genuinely need them. When changing CLI, daemon, or tool behavior, add a focused regression test in the matching test module.
 
-```python
-# Domain model (mutable)
-@define
-class AgentState:
-    history: list[yuullm.Message] = field(factory=list)
+## Commit & Pull Request Guidelines
 
-# API DTO (immutable)
-class TaskRequest(msgspec.Struct, frozen=True, kw_only=True):
-    persona: str
-    task: str
-```
-
-### Tool Definitions
-Tools use the `yuutools` framework:
-
-```python
-@yt.tool(
-    params={"command": "Description"},
-    description="Tool description",
-)
-async def my_tool(
-    command: str,
-    ctx: str = yt.depends(lambda ctx: ctx.attribute),
-) -> str:
-    ...
-```
-
-### Error Handling
-- Use explicit try/except with specific exceptions
-- Use `KeyError` for missing dict keys, not generic `Exception`
-- Log errors with `loguru` (imported as needed)
-- Propagate errors to caller with context
-
-### Async Patterns
-- Use `async def` for I/O operations and LLM calls
-- Use `await` consistently; don't mix sync/async unnecessarily
-- Use `asyncio.Queue` for inter-task communication
-- Use `asyncio.create_task()` for background work
-
-### Formatting
-- 4-space indentation (no tabs)
-- 88-100 character line length (ruff default)
-- Docstrings in triple quotes for modules, classes, and functions
-- Use `match/case` for structural pattern matching (Python 3.10+)
-
-### API Design
-- RESTful routes using Starlette
-- Return JSON via msgspec encoder for performance
-- Use proper HTTP status codes (201 for created, 404 for not found)
-- Unix Domain Socket for CLI-daemon communication
-
-### Testing
-- Use pytest
-- Test files: `tests/test_*.py`
-- Use `pytest-asyncio` for async tests
-- Mock external services (LLM, Docker) in unit tests
-
-## Project Structure
-
-```
-src/yuuagents/
-├── __init__.py       # Public API exports
-├── agent.py          # Core Agent class
-├── types.py          # msgspec DTOs
-├── config.py         # TOML configuration
-├── context.py        # AgentContext for DI
-├── loop.py           # Main agent execution loop
-├── cli/              # CLI commands
-├── daemon/           # HTTP server & managers
-├── tools/            # Built-in tools
-└── skills/           # Skill discovery
-```
-
-## Dependencies
-
-Key external packages:
-- `attrs` — class definitions
-- `msgspec` — JSON serialization
-- `click` — CLI framework
-- `starlette` + `uvicorn` — HTTP server
-- `httpx` — HTTP client
-- `aiodocker` — Docker integration
-- `yuutools`, `yuullm`, `yuutrace` — Internal yuu packages
-
-Always prefer `msgspec` over `pydantic` for performance. Prefer `httpx` over `requests` for async support.
+Recent history uses short imperative subjects with conventional prefixes such as `feat:`, `fix:`, `refactor:`, and `chore:`. Keep commits scoped to one logical change. PRs should state the affected package, summarize behavior changes, list verification commands, and call out any config or migration impact. Include screenshots only when the change affects user-facing output.

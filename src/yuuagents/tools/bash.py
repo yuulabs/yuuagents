@@ -8,7 +8,7 @@ from typing import Any
 import yuutools as yt
 from loguru import logger
 
-from yuuagents.context import DockerExecutor
+from yuuagents.capabilities import DockerCapability, require_docker
 
 _SOFT_TIMEOUT_PREFIX = "[SOFT_TIMEOUT] "
 
@@ -37,19 +37,20 @@ async def execute_bash(
     timeout: int = 120,
     soft_timeout: int | None = None,
     session_id: str = yt.depends(lambda ctx: ctx.current_run_id or ctx.task_id),
-    container: str = yt.depends(lambda ctx: ctx.docker_container),
-    docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
+    docker: DockerCapability = yt.depends(require_docker),
     flow: Any = yt.depends(lambda ctx: ctx.current_flow),
 ) -> str:
     timeout = max(1, min(timeout, 600))
+    container = docker.container_id
+    executor = docker.executor
 
     if soft_timeout is None:
-        return await docker.exec_terminal(
+        return await executor.exec_terminal(
             container, session_id, command, timeout,
         )
 
     soft_timeout = max(1, min(soft_timeout, timeout))
-    result = await docker.exec_terminal(
+    result = await executor.exec_terminal(
         container, session_id, command, timeout, soft_timeout=soft_timeout,
     )
 
@@ -65,13 +66,13 @@ async def execute_bash(
     flow.request_defer(partial)
 
     # Phase 2: background — poll PendingCommand for partial output, then await.
-    pending = docker.get_pending(container, session_id)
+    pending = executor.get_pending(container, session_id)
     assert pending is not None
 
     while not pending.done:
         await asyncio.sleep(3)
         try:
-            cap = await docker.capture_terminal(container, session_id)
+            cap = await executor.capture_terminal(container, session_id)
             part = pending.partial(cap)
             if part:
                 flow.emit(part)

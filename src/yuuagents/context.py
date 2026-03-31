@@ -1,105 +1,16 @@
-"""AgentContext — dependency-injection context for builtin tools."""
+"""AgentContext — minimal runtime context shared by SDK and daemon mode."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING
 
-from attrs import define, evolve
+from attrs import define, evolve, field
+
+from yuuagents.capabilities import AgentCapabilities
 
 if TYPE_CHECKING:
     from yuuagents.core.flow import Flow
-    from yuuagents.input import AgentInput
     from yuuagents.runtime_session import Session
-
-
-class DockerExecutor(Protocol):
-    async def exec(self, container_id: str, command: str, timeout: int) -> str: ...
-    async def exec_terminal(
-        self,
-        container_id: str,
-        session_id: str,
-        command: str,
-        timeout: int,
-        *,
-        soft_timeout: int | None = None,
-    ) -> str: ...
-    def get_pending(
-        self,
-        container_id: str,
-        session_id: str,
-    ) -> Any: ...
-    async def resume_pending(
-        self,
-        container_id: str,
-        session_id: str,
-        timeout: int,
-    ) -> str: ...
-    async def write_terminal(
-        self,
-        container_id: str,
-        session_id: str,
-        data: str,
-        *,
-        append_newline: bool = True,
-    ) -> str: ...
-    async def capture_terminal(
-        self,
-        container_id: str,
-        session_id: str,
-    ) -> str: ...
-
-
-class DelegateManager(Protocol):
-    async def start_delegate(
-        self,
-        *,
-        parent: Session,
-        parent_run_id: str,
-        agent: str,
-        input: AgentInput,
-        tools: list[str] | None,
-        delegate_depth: int,
-    ) -> Session: ...
-
-    def inspect_run(
-        self,
-        *,
-        parent: Session,
-        run_id: str,
-        limit: int = 200,
-        max_chars: int = 4000,
-    ) -> str: ...
-
-    def cancel_run(
-        self,
-        *,
-        parent: Session,
-        run_id: str,
-    ) -> str: ...
-
-    def defer_run(
-        self,
-        *,
-        parent: Session,
-        run_id: str,
-        message: str,
-    ) -> str: ...
-
-    async def input_run(
-        self,
-        *,
-        parent: Session,
-        run_id: str,
-        data: str,
-        append_newline: bool = True,
-    ) -> str: ...
-
-    async def wait_runs(
-        self,
-        *,
-        parent: Session,
-        run_ids: list[str],
-    ) -> str: ...
 
 
 class DelegateDepthExceededError(RuntimeError):
@@ -128,12 +39,8 @@ class AgentContext:
     task_id: str
     agent_id: str
     workdir: str
-    docker_container: str
+    capabilities: AgentCapabilities = field(factory=AgentCapabilities)
     delegate_depth: int = 0
-    manager: DelegateManager | None = None
-    docker: DockerExecutor | None = None
-    tavily_api_key: str = ""
-    subprocess_env: dict | None = None
     session: Session | None = None
     current_run_id: str = ""
     current_flow: Flow | None = None

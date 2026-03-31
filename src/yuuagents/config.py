@@ -45,7 +45,7 @@ class DbConfig(msgspec.Struct, kw_only=True):
 
 
 class YuuTraceConfig(msgspec.Struct, kw_only=True):
-    db_path: str = "~/.yagents/traces.db"
+    db_path: str = "./.yagents/traces.db"
     ui_port: int = 8080
     server_port: int = 4318
 

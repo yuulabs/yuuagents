@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+import sys
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
@@ -177,6 +180,28 @@ def test_flow_render():
     assert flow.render(str) == "line1\nline2"
 
 
+def test_import_yuuagents_does_not_eager_import_service_modules():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, sys; import yuuagents; "
+                "print(json.dumps({"
+                "'tools': 'yuuagents.tools' in sys.modules, "
+                "'init': 'yuuagents.init' in sys.modules"
+                "}))"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    loaded = json.loads(result.stdout.strip())
+    assert loaded == {"tools": False, "init": False}
+
+
 # ---------------------------------------------------------------------------
 # Tests: Agent — text-only response (no tool calls)
 # ---------------------------------------------------------------------------
@@ -263,7 +288,6 @@ async def test_session_exposes_last_and_total_usage_and_cost():
             task_id="task-1",
             agent_id="host-facing",
             workdir="",
-            docker_container="",
         ),
     )
 
@@ -355,7 +379,6 @@ async def test_session_resume_preserves_conversation_id():
             task_id="task-1",
             agent_id="host-facing",
             workdir="",
-            docker_container="",
         ),
     )
 
@@ -405,7 +428,6 @@ async def test_resume_trace_records_system_and_tools():
         task_id="task-1",
         agent_id="host-facing",
         workdir="",
-        docker_container="",
     )
 
     first = Session(config=config, context=context)
@@ -800,7 +822,7 @@ async def test_steps_session_host_break_syncs():
     client = make_client(script)
     session = Session(
         config=AgentConfig(agent_id="test", tools=manager, llm=client),
-        context=AgentContext(task_id="t1", agent_id="test", workdir="", docker_container=""),
+        context=AgentContext(task_id="t1", agent_id="test", workdir=""),
     )
     session.start(user_input("Go"))
 

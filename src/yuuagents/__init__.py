@@ -14,6 +14,7 @@ from yuutools import (
 
 # yuuagents own symbols
 from yuuagents.agent import AgentConfig
+from yuuagents.capabilities import AgentCapabilities, DockerCapability, WebCapability
 from yuuagents.context import AgentContext
 from yuuagents.input import (
     AgentInput,
@@ -22,12 +23,10 @@ from yuuagents.input import (
     RolloverInput,
     ScheduledInput,
 )
+from yuuagents.local import LocalAgent, LocalRun, LocalRunResult, run_once
 from yuuagents.core.flow import AgentState
 from yuuagents.runtime_session import Session
 from yuuagents.types import AgentInfo, AgentStatus, StepResult, TaskRequest
-
-from yuuagents import tools  # noqa: F401 — yuuagents.tools.execute_bash etc.
-from yuuagents import init  # noqa: F401 — yuuagents.init.setup
 
 __all__ = [
     # from yuutools
@@ -41,11 +40,16 @@ __all__ = [
     "DependencyMarker",
     # from yuuagents
     "AgentConfig",
+    "AgentCapabilities",
     "AgentInput",
     "AgentState",
     "AgentContext",
     "ConversationInput",
+    "DockerCapability",
     "HandoffInput",
+    "LocalAgent",
+    "LocalRun",
+    "LocalRunResult",
     "RolloverInput",
     "ScheduledInput",
     "Session",
@@ -53,6 +57,6 @@ __all__ = [
     "AgentInfo",
     "StepResult",
     "TaskRequest",
-    "tools",
-    "init",
+    "WebCapability",
+    "run_once",
 ]

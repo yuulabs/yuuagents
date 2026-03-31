@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""YAgents 交互式入门引导
-
-这个脚本会引导你完成 YAgents 的初始配置，并运行第一个示例任务。
-"""
+"""YAgents 交互式 service-mode 入门引导."""
 
 from __future__ import annotations
 
 import importlib
 import os
+import re
 import subprocess
 import sys
 import time
@@ -62,8 +60,8 @@ def print_header() -> None:
     """打印欢迎标题"""
     console.print(
         Panel.fit(
-            "[bold cyan]YAgents 交互式入门引导[/bold cyan]\n"
-            "[dim]minimal agent framework[/dim]",
+            "[bold cyan]YAgents 交互式 Service Mode 引导[/bold cyan]\n"
+            "[dim]daemon / CLI onboarding[/dim]",
             border_style="cyan",
         )
     )
@@ -82,8 +80,8 @@ def check_prerequisites() -> None:
         console.print("  [green]✓[/green] yagents 已安装")
     except FileNotFoundError:
         console.print("  [red]✗ yagents 未安装[/red]")
-        console.print("\n[yellow]请先安装 yagents:[/yellow]")
-        console.print("  pip install -e .")
+        console.print("\n[yellow]请先安装 service mode 依赖:[/yellow]")
+        console.print("  pip install -e '.[all]'")
         sys.exit(1)
 
     # 检查 Docker
@@ -197,8 +195,8 @@ def configure_provider() -> SetupConfig:
 
 
 def setup_yagents(config: SetupConfig) -> None:
-    """运行 yagents setup"""
-    console.print("[bold]步骤 2: 运行 yagents setup[/bold]\n")
+    """运行 yagents install"""
+    console.print("[bold]步骤 2: 运行 yagents install (service mode)[/bold]\n")
 
     # 设置 API key 环境变量供 setup 使用
     os.environ[config["api_key_env"]] = config["api_key"]
@@ -221,7 +219,7 @@ def setup_yagents(config: SetupConfig) -> None:
                 "tools": [
                     "execute_bash",
                     "read_file",
-                    "write_file",
+                    "edit_file",
                     "delete_file",
                     "web_search",
                 ],
@@ -242,11 +240,11 @@ def setup_yagents(config: SetupConfig) -> None:
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("运行 yagents setup...", total=None)
+        task = progress.add_task("运行 yagents install...", total=None)
 
         try:
             result = subprocess.run(
-                ["yagents", "setup"],
+                ["yagents", "install"],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -254,13 +252,13 @@ def setup_yagents(config: SetupConfig) -> None:
             progress.update(task, completed=True)
 
             if result.returncode == 0:
-                console.print("  [green]✓[/green] setup 完成")
+                console.print("  [green]✓[/green] install 完成")
             else:
-                console.print("  [red]✗ setup 失败[/red]")
+                console.print("  [red]✗ install 失败[/red]")
                 console.print(result.stderr)
                 sys.exit(1)
         except subprocess.TimeoutExpired:
-            console.print("  [red]✗ setup 超时[/red]")
+            console.print("  [red]✗ install 超时[/red]")
             sys.exit(1)
 
     # 清理临时文件
@@ -269,14 +267,14 @@ def setup_yagents(config: SetupConfig) -> None:
     console.print()
 
 
-def start_daemon() -> subprocess.Popen[bytes]:
+def start_daemon() -> None:
     """启动 daemon"""
     console.print("[bold]步骤 3: 启动 yagents daemon[/bold]\n")
 
     # 检查 daemon 是否已在运行
     try:
         subprocess.run(
-            ["yagents", "stop"],
+            ["yagents", "down"],
             capture_output=True,
             timeout=5,
         )
@@ -285,14 +283,16 @@ def start_daemon() -> subprocess.Popen[bytes]:
 
     # 启动 daemon (后台)
     console.print("启动 daemon...")
-
-    import subprocess as sp
-
-    daemon_proc = sp.Popen(
-        ["yagents", "start"],
-        stdout=sp.PIPE,
-        stderr=sp.PIPE,
+    result = subprocess.run(
+        ["yagents", "up", "-d"],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
+    if result.returncode != 0:
+        console.print("  [red]✗[/red] daemon 启动失败")
+        console.print(result.stderr or result.stdout)
+        sys.exit(1)
 
     # 等待 daemon 启动
     time.sleep(2)
@@ -300,8 +300,9 @@ def start_daemon() -> subprocess.Popen[bytes]:
     # 检查是否成功启动
     try:
         subprocess.run(
-            ["yagents", "stop"],
+            ["yagents", "list"],
             capture_output=True,
+            check=True,
             timeout=5,
         )
         console.print("  [green]✓[/green] daemon 已启动")
@@ -309,7 +310,6 @@ def start_daemon() -> subprocess.Popen[bytes]:
         console.print("  [yellow]![/yellow] daemon 可能正在启动中，请稍后手动检查")
 
     console.print()
-    return daemon_proc
 
 
 def run_first_task(config: SetupConfig) -> None:
@@ -356,23 +356,24 @@ def run_first_task(config: SetupConfig) -> None:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode == 0:
-            agent_id = result.stdout.strip().replace("Agent started: ", "")
+            match = re.search(r"Task started:\s+(\S+)", result.stdout)
+            task_id = match.group(1) if match else result.stdout.strip()
             console.print(
-                f"  [green]✓[/green] 任务已提交，Agent ID: [cyan]{agent_id}[/cyan]\n"
+                f"  [green]✓[/green] 任务已提交，Task ID: [cyan]{task_id}[/cyan]\n"
             )
 
             # 显示监控提示
             console.print("你可以使用以下命令监控任务执行:")
-            console.print("  [dim]yagents list              # 列出所有 agents[/dim]")
-            console.print(f"  [dim]yagents status {agent_id}   # 查看详细状态[/dim]")
-            console.print(f"  [dim]yagents logs {agent_id}     # 查看对话历史[/dim]")
+            console.print("  [dim]yagents list              # 列出所有任务[/dim]")
+            console.print(f"  [dim]yagents status {task_id}   # 查看详细状态[/dim]")
+            console.print(f"  [dim]yagents logs {task_id}     # 查看对话历史[/dim]")
 
             # 等待几秒显示状态
             console.print("\n[bold]等待 5 秒后检查任务状态...[/bold]\n")
             time.sleep(5)
 
             status_result = subprocess.run(
-                ["yagents", "status", agent_id],
+                ["yagents", "status", task_id],
                 capture_output=True,
                 text=True,
             )
@@ -386,7 +387,7 @@ def run_first_task(config: SetupConfig) -> None:
                     table.add_column("属性", style="cyan")
                     table.add_column("值", style="green")
 
-                    table.add_row("Agent ID", agent_id)
+                    table.add_row("Task ID", task_id)
                     table.add_row("状态", status.get("status", "unknown"))
                     table.add_row("步骤数", str(status.get("steps", 0)))
                     table.add_row("总成本", f"${status.get('total_cost_usd', 0):.4f}")
@@ -414,10 +415,10 @@ def print_next_steps() -> None:
             "[bold green]🎉 YAgents 入门引导完成！[/bold green]\n\n"
             "[bold]常用命令:[/bold]\n"
             '  yagents run --task "你的任务"     提交新任务\n'
-            "  yagents list                      列出所有 agents\n"
-            "  yagents status <agent_id>         查看 agent 状态\n"
-            "  yagents logs <agent_id>           查看对话历史\n"
-            "  yagents stop-agent <agent_id>     停止 agent\n\n"
+            "  yagents list                      列出所有任务\n"
+            "  yagents status <task_id>          查看任务状态\n"
+            "  yagents logs <task_id>            查看对话历史\n"
+            "  yagents stop <task_id>            取消任务\n\n"
             "[bold]配置:[/bold]\n"
             "  配置文件位置: ~/.yagents/config.yaml\n"
             "  yagents config                    查看当前配置\n\n"
@@ -438,11 +439,11 @@ def main() -> None:
     # 配置 Provider
     config = configure_provider()
 
-    # 运行 setup
+    # 运行 install
     setup_yagents(config)
 
     # 启动 daemon
-    daemon_proc = start_daemon()
+    start_daemon()
 
     # 运行第一个任务
     if Confirm.ask("是否现在运行示例任务?", default=True):
@@ -450,16 +451,6 @@ def main() -> None:
 
     # 打印后续步骤
     print_next_steps()
-
-    console.print("[dim]提示: 按 Ctrl+C 可以停止 daemon[/dim]")
-
-    try:
-        # 保持运行
-        if daemon_proc.poll() is None:
-            daemon_proc.wait()
-    except KeyboardInterrupt:
-        console.print("\n[dim]正在停止 daemon...[/dim]")
-        daemon_proc.terminate()
 
 
 if __name__ == "__main__":

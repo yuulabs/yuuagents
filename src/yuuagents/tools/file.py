@@ -8,7 +8,7 @@ import shlex
 
 import yuutools as yt
 
-from yuuagents.context import DockerExecutor
+from yuuagents.capabilities import DockerCapability, require_docker
 
 _READ_FILE_MAX_LINES = 200
 _READ_IMAGE_EXTS = {
@@ -33,8 +33,7 @@ async def read_file(
     path: str,
     start_line: int = 1,
     end_line: int | None = None,
-    container: str = yt.depends(lambda ctx: ctx.docker_container),
-    docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
+    docker: DockerCapability = yt.depends(require_docker),
 ) -> str | list[dict[str, object]]:
     assert isinstance(path, str)
     assert path.startswith("/")
@@ -109,7 +108,7 @@ async def read_file(
         "    }, ensure_ascii=False))\n"
         "PY"
     )
-    raw = await docker.exec(container, cmd, timeout=30)
+    raw = await docker.executor.exec(docker.container_id, cmd, timeout=30)
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
@@ -144,11 +143,10 @@ async def read_file(
 )
 async def delete_file(
     path: str,
-    container: str = yt.depends(lambda ctx: ctx.docker_container),
-    docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
+    docker: DockerCapability = yt.depends(require_docker),
 ) -> str:
     cmd = f"rm -f {shlex.quote(path)}"
-    return await docker.exec(container, cmd, timeout=30)
+    return await docker.executor.exec(docker.container_id, cmd, timeout=30)
 
 
 @yt.tool(
@@ -167,8 +165,7 @@ async def edit_file(
     old_string: str | None = None,
     start_line: int | None = None,
     end_line: int | None = None,
-    container: str = yt.depends(lambda ctx: ctx.docker_container),
-    docker: DockerExecutor = yt.depends(lambda ctx: ctx.docker),
+    docker: DockerCapability = yt.depends(require_docker),
 ) -> str:
     assert isinstance(path, str)
     assert path
@@ -232,7 +229,7 @@ async def edit_file(
         "print(f'Edited {path}')\n"
         "PY"
     )
-    raw = await docker.exec(container, cmd, timeout=30)
+    raw = await docker.executor.exec(docker.container_id, cmd, timeout=30)
     msg = raw.strip()
     if msg.startswith("Traceback (most recent call last):"):
         raise RuntimeError(msg)

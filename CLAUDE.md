@@ -27,7 +27,7 @@ uv run ruff format src/
 uv run mypy src/
 
 # Start daemon / submit task / stop
-uv run yagents start
+uv run yagents up -d
 uv run yagents run --agent main --task "..."
 uv run yagents down
 ```

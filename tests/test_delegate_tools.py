@@ -8,6 +8,7 @@ import yuullm
 import yuutools as yt
 
 from yuuagents.agent import AgentConfig
+from yuuagents.capabilities import AgentCapabilities
 from yuuagents.context import AgentContext
 from yuuagents.input import AgentInput, HandoffInput
 from yuuagents.runtime_session import Session
@@ -91,8 +92,7 @@ class _FakeManager:
                 task_id="child-task",
                 agent_id=agent,
                 workdir="",
-                docker_container="",
-                manager=self,
+                capabilities=AgentCapabilities(delegate=self),
             ),
         )
         session.start(input)
@@ -150,8 +150,7 @@ def _make_session(manager: _FakeManager, *, agent_id: str, reply: str) -> Sessio
             task_id=f"{agent_id}-task",
             agent_id=agent_id,
             workdir="",
-            docker_container="",
-            manager=manager,
+            capabilities=AgentCapabilities(delegate=manager),
         ),
     )
 
@@ -201,8 +200,7 @@ async def test_background_tools_call_manager():
         task_id="task",
         agent_id="agent",
         workdir="",
-        docker_container="",
-        manager=manager,
+        capabilities=AgentCapabilities(delegate=manager),
         session=parent,
     )
 
@@ -233,3 +231,11 @@ async def test_background_tools_call_manager():
     assert manager.input_calls == [("bg-4", "hello", False)]
     assert manager.defer_calls == [("bg-3", "please report")]
     assert manager.wait_calls == [["bg-1", "bg-3"]]
+
+
+@pytest.mark.asyncio
+async def test_delegate_tool_requires_delegate_capability() -> None:
+    ctx = AgentContext(task_id="task", agent_id="agent", workdir="")
+
+    with pytest.raises(RuntimeError, match="delegate capability unavailable"):
+        await _bind(delegate, ctx).run(agent="coder", context="", task="fix bug")

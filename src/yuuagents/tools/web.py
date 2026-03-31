@@ -6,6 +6,8 @@ import importlib
 
 import yuutools as yt
 
+from yuuagents.capabilities import WebCapability, require_web
+
 
 @yt.tool(
     params={
@@ -17,11 +19,11 @@ import yuutools as yt
 async def web_search(
     query: str,
     max_results: int = 5,
-    api_key: str = yt.depends(lambda ctx: ctx.tavily_api_key),
+    capability: WebCapability = yt.depends(require_web),
 ) -> str:
     max_results = max(1, min(max_results, 10))
     tavily = importlib.import_module("tavily")
-    client = tavily.AsyncTavilyClient(api_key=api_key)
+    client = tavily.AsyncTavilyClient(api_key=capability.api_key)
     resp = await client.search(query=query, max_results=max_results)
 
     parts: list[str] = []

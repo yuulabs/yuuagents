@@ -10,8 +10,8 @@ from yuullm.types import is_text_item
 
 from yuuagents.context import (
     DelegateDepthExceededError,
-    DelegateManager,
 )
+from yuuagents.capabilities import DelegateManager, require_delegate_manager
 from yuuagents.input import HandoffInput
 from yuuagents.runtime_session import Session
 from yuuagents.types import AgentStatus
@@ -45,15 +45,13 @@ async def delegate(
     context: str,
     task: str,
     tools: list[str] | None = None,
-    manager: DelegateManager | None = yt.depends(lambda ctx: ctx.manager),
+    manager: DelegateManager = yt.depends(require_delegate_manager),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
     parent_run_id: str = yt.depends(lambda ctx: ctx.current_run_id),
     delegate_depth: int = yt.depends(lambda ctx: ctx.delegate_depth),
 ) -> str:
-    if manager is None:
-        return "[ERROR] delegate manager unavailable"
     if parent is None:
-        return "[ERROR] delegate requires an active parent session"
+        raise RuntimeError("delegate requires an active parent session")
 
     next_depth = delegate_depth + 1
     if next_depth > 3:

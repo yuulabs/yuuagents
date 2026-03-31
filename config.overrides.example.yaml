@@ -3,7 +3,7 @@
 # ============================================================================
 #
 # Copy this file to `config.overrides.yaml` (same directory) and edit it.
-# When you run `yagents setup`, overrides are deep-merged on top of the
+# When you run `yagents install`, overrides are deep-merged on top of the
 # default config.example.yaml before writing to ~/.yagents/config.yaml.
 #
 # Only include the settings you want to change — everything else inherits
@@ -45,5 +45,5 @@
 #     tools:
 #       - execute_bash
 #       - read_file
-#       - write_file
+#       - edit_file
 #       - web_search

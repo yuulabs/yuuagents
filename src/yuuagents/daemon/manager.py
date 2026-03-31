@@ -18,6 +18,7 @@ from attrs import define, field
 from yuullm.types import is_text_item, is_tool_call_item
 
 from yuuagents.agent import AgentConfig
+from yuuagents.capabilities import AgentCapabilities, DockerCapability, WebCapability
 from yuuagents.config import Config, ProviderConfig
 from yuuagents.context import AgentContext
 from yuuagents.core.flow import render_agent_event
@@ -26,7 +27,7 @@ from yuuagents.input import AgentInput
 from yuuagents.persistence import TaskPersistence, TaskWriter
 from yuuagents.prompts import get_vars as get_prompt_vars
 from yuuagents.runtime_session import Session
-from yuuagents.tools import BUILTIN_TOOLS
+from yuuagents.tools import get as get_builtin_tools
 from yuuagents.types import AgentInfo, AgentStatus, ErrorInfo, TaskRequest
 
 
@@ -43,6 +44,25 @@ def _make_error(exc: Exception) -> ErrorInfo:
 
 def _build_system_prompt(*sections: str) -> str:
     return "\n\n".join(section for section in sections if section)
+
+
+_DOCKER_TOOL_NAMES = frozenset({
+    "execute_bash",
+    "read_file",
+    "edit_file",
+    "delete_file",
+})
+
+_DELEGATE_TOOL_NAMES = frozenset({
+    "delegate",
+    "inspect_background",
+    "cancel_background",
+    "input_background",
+    "defer_background",
+    "wait_background",
+})
+
+_WEB_TOOL_NAMES = frozenset({"web_search"})
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -239,12 +259,11 @@ class AgentManager:
         tool_name = flow.info.get("tool_name")
         if tool_name != "execute_bash":
             return f"[ERROR] run {run_id!r} does not accept input"
-        docker = parent.context.docker
-        container = parent.context.docker_container
-        if docker is None or not container:
+        docker = parent.context.capabilities.docker
+        if docker is None or not docker.container_id:
             return f"[ERROR] docker terminal unavailable for run {run_id!r}"
-        return await docker.write_terminal(
-            container,
+        return await docker.executor.write_terminal(
+            docker.container_id,
             run_id,
             data,
             append_newline=append_newline,
@@ -588,41 +607,48 @@ class AgentManager:
             "web_search",
         ]
 
+    def _needs_docker(self, tool_names: list[str]) -> bool:
+        return any(name in _DOCKER_TOOL_NAMES for name in tool_names)
+
+    def _needs_delegate(self, tool_names: list[str]) -> bool:
+        return any(name in _DELEGATE_TOOL_NAMES for name in tool_names)
+
+    def _needs_web(self, tool_names: list[str]) -> bool:
+        return any(name in _WEB_TOOL_NAMES for name in tool_names)
+
     async def _build_session(
         self,
         *,
         task_id: str,
         req: TaskRequest,
         delegate_depth: int,
-        docker_container: str = "",
         workdir: str = "",
-        tavily_api_key: str = "",
+        docker_capability: DockerCapability | None = None,
     ) -> Session:
         """Build a Session for both root and child (delegate) use cases.
 
-        For root sessions, pass docker_container/workdir/tavily_api_key as empty
-        to use defaults. For child sessions, pass the parent's values.
+        For root sessions, pass explicit capabilities as ``None`` to use defaults.
+        For child sessions, pass inherited capabilities from the parent.
         """
         agent_id = req.agent
         agent_entry = self.config.agents.get(agent_id)
         llm_client = self._make_llm(agent_name=agent_id, model_override=req.model)
         tool_names = req.tools or self._default_tools(agent_id)
-        tool_objs = [BUILTIN_TOOLS[name] for name in tool_names if name in BUILTIN_TOOLS]
-        tools = yt.ToolManager(tool_objs)
+        tools = yt.ToolManager(get_builtin_tools(tool_names))
+        needs_docker = self._needs_docker(tool_names)
         persona_text = (
             req.persona
             or (agent_entry.persona if agent_entry and agent_entry.persona else "")
             or agent_id
         )
         # Root sessions apply prompt variable substitution
-        if not docker_container:
+        if docker_capability is None:
             prompt_vars = get_prompt_vars()
             for key, value in prompt_vars.items():
                 persona_text = persona_text.replace(f"{{{key}}}", value)
         agents_prompt = self._default_agents_prompt(agent_id=agent_id)
-        system_prompt = _build_system_prompt(
-            persona_text, agents_prompt, DOCKER_SYSTEM_PROMPT
-        )
+        docker_prompt = DOCKER_SYSTEM_PROMPT if needs_docker else ""
+        system_prompt = _build_system_prompt(persona_text, agents_prompt, docker_prompt)
         config = AgentConfig(
             agent_id=agent_id,
             tools=tools,
@@ -631,22 +657,39 @@ class AgentManager:
             soft_timeout=(agent_entry.soft_timeout or None) if agent_entry else None,
             silence_timeout=(agent_entry.silence_timeout or None) if agent_entry else None,
         )
-        # Resolve docker container for root, or reuse parent's for child
-        if not docker_container:
+        # Resolve docker container for root, or reuse parent's for child.
+        if needs_docker and docker_capability is None:
             docker_container = await self.docker.resolve(
                 task_id=task_id,
                 container=req.container,
                 image=req.image,
             )
+            docker_capability = DockerCapability(
+                executor=self.docker,
+                container_id=docker_container,
+            )
+        elif not needs_docker:
+            docker_capability = None
+
+        capabilities = AgentCapabilities(
+            docker=docker_capability,
+            delegate=self if self._needs_delegate(tool_names) else None,
+            web=(
+                WebCapability(
+                    api_key=os.environ.get(self.config.tavily.api_key_env, ""),
+                )
+                if self._needs_web(tool_names)
+                else None
+            ),
+        )
         ctx = AgentContext(
             task_id=task_id,
             agent_id=agent_id,
-            workdir=workdir or self.docker.workdir,
-            docker_container=docker_container,
+            workdir=workdir or (
+                self.docker.workdir if docker_capability is not None else str(Path.cwd())
+            ),
+            capabilities=capabilities,
             delegate_depth=delegate_depth,
-            manager=self,
-            docker=self.docker,
-            tavily_api_key=tavily_api_key or os.environ.get(self.config.tavily.api_key_env, ""),
         )
         session = Session(
             config=config,
@@ -675,7 +718,11 @@ class AgentManager:
                 system_prompt=session.config.system,
                 model=session.config.llm.default_model,
                 tools=req.tools or self._default_tools(req.agent),
-                docker_container=session.context.docker_container,
+                docker_container=(
+                    session.context.capabilities.docker.container_id
+                    if session.context.capabilities.docker is not None
+                    else ""
+                ),
                 created_at=session.created_at,
             )
         return session
@@ -692,7 +739,6 @@ class AgentManager:
             task_id=task_id,
             req=req,
             delegate_depth=delegate_depth,
-            docker_container=parent.context.docker_container,
             workdir=parent.context.workdir,
-            tavily_api_key=parent.context.tavily_api_key,
+            docker_capability=parent.context.capabilities.docker,
         )

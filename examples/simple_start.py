@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""YAgents 简单入门引导 (无 rich 依赖)
-
-这个脚本不依赖 rich 库，适合快速体验。
-"""
+"""YAgents service-mode 入门引导 (无 rich 依赖)."""
 
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,8 +30,8 @@ CONFIG_PATH = YAGENTS_HOME / "config.yaml"
 def print_banner() -> None:
     """打印横幅"""
     print("=" * 60)
-    print("  YAgents 入门引导")
-    print("  minimal agent framework")
+    print("  YAgents Service Mode 入门引导")
+    print("  daemon / CLI onboarding")
     print("=" * 60)
     print()
 
@@ -48,7 +46,7 @@ def check_prerequisites() -> None:
         print("  ✓ yagents 已安装")
     except (FileNotFoundError, subprocess.CalledProcessError):
         print("  ✗ yagents 未安装")
-        print("\n请先安装: pip install -e .")
+        print("\n请先安装 service mode 依赖: pip install -e '.[all]'")
         sys.exit(1)
 
     # 检查 Docker
@@ -114,8 +112,8 @@ def configure_provider() -> SetupConfig:
 
 
 def setup_yagents(config: SetupConfig) -> None:
-    """运行 setup"""
-    print("步骤 2: 运行 yagents setup\n")
+    """运行 install"""
+    print("步骤 2: 运行 yagents install (service mode)\n")
 
     # 创建 overrides
     overrides: dict[str, Any] = {
@@ -134,7 +132,7 @@ def setup_yagents(config: SetupConfig) -> None:
                 "provider": config["provider_name"],
                 "model": config["model"],
                 "persona": "You are a helpful assistant.",
-                "tools": ["execute_bash", "read_file", "write_file", "web_search"],
+                "tools": ["execute_bash", "read_file", "edit_file", "web_search"],
             }
         },
     }
@@ -147,46 +145,47 @@ def setup_yagents(config: SetupConfig) -> None:
         yaml.dump(overrides, default_flow_style=False, allow_unicode=True)
     )
 
-    print("运行 setup...")
-    result = subprocess.run(["yagents", "setup"], capture_output=True, text=True)
+    print("运行 install...")
+    result = subprocess.run(["yagents", "install"], capture_output=True, text=True)
 
     overrides_path.unlink(missing_ok=True)
 
     if result.returncode == 0:
-        print("  ✓ setup 完成")
+        print("  ✓ install 完成")
     else:
-        print("  ✗ setup 失败")
+        print("  ✗ install 失败")
         print(result.stderr)
         sys.exit(1)
 
     print()
 
 
-def start_daemon() -> subprocess.Popen[bytes]:
+def start_daemon() -> None:
     """启动 daemon"""
     print("步骤 3: 启动 daemon\n")
 
     # 尝试停止已有的
     try:
-        subprocess.run(["yagents", "stop"], capture_output=True, timeout=5)
+        subprocess.run(["yagents", "down"], capture_output=True, timeout=5)
     except Exception:
         pass
 
     # 启动 daemon
     print("启动 daemon (后台)...")
-    import subprocess as sp
-
-    proc = sp.Popen(
-        ["yagents", "start"],
-        stdout=sp.DEVNULL,
-        stderr=sp.DEVNULL,
+    result = subprocess.run(
+        ["yagents", "up", "-d"],
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
+    if result.returncode != 0:
+        print("  ✗ daemon 启动失败")
+        print(result.stderr or result.stdout)
+        sys.exit(1)
 
     time.sleep(2)
     print("  ✓ daemon 已启动")
     print()
-
-    return proc
 
 
 def run_example_task(config: SetupConfig) -> None:
@@ -210,10 +209,11 @@ def run_example_task(config: SetupConfig) -> None:
     )
 
     if result.returncode == 0:
-        agent_id = result.stdout.strip().replace("Agent started: ", "")
-        print(f"  ✓ 任务已提交，Agent ID: {agent_id}")
-        print(f"\n查看状态: yagents status {agent_id}")
-        print(f"查看日志: yagents logs {agent_id}")
+        match = re.search(r"Task started:\s+(\S+)", result.stdout)
+        task_id = match.group(1) if match else result.stdout.strip()
+        print(f"  ✓ 任务已提交，Task ID: {task_id}")
+        print(f"\n查看状态: yagents status {task_id}")
+        print(f"查看日志: yagents logs {task_id}")
     else:
         print(f"  ✗ 失败: {result.stderr}")
 
@@ -229,10 +229,12 @@ def print_summary() -> None:
     print("常用命令:")
     print('  yagents run --task "你的任务"')
     print("  yagents list")
-    print("  yagents status <agent_id>")
-    print("  yagents logs <agent_id>")
+    print("  yagents status <task_id>")
+    print("  yagents logs <task_id>")
+    print("  yagents stop <task_id>")
     print()
     print("配置: ~/.yagents/config.yaml")
+    print("说明: 这个脚本面向 daemon / service mode，不是纯 SDK quick start。")
     print()
 
 
@@ -241,15 +243,9 @@ def main() -> None:
     check_prerequisites()
     config = configure_provider()
     setup_yagents(config)
-    daemon_proc = start_daemon()
+    start_daemon()
     run_example_task(config)
     print_summary()
-
-    try:
-        daemon_proc.wait()
-    except KeyboardInterrupt:
-        print("\n停止 daemon...")
-        daemon_proc.terminate()
 
 
 if __name__ == "__main__":

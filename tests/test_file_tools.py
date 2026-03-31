@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from yuuagents.context import AgentContext, DockerExecutor
+from yuuagents.capabilities import AgentCapabilities, DockerCapability, DockerExecutor
+from yuuagents.context import AgentContext
 from yuuagents.tools.file import edit_file, read_file
 
 
@@ -63,8 +64,9 @@ def make_ctx(docker: DockerExecutor) -> AgentContext:
         task_id="task-1",
         agent_id="agent-1",
         workdir="/tmp",
-        docker_container="cid",
-        docker=docker,
+        capabilities=AgentCapabilities(
+            docker=DockerCapability(executor=docker, container_id="cid"),
+        ),
     )
 
 
@@ -209,3 +211,11 @@ async def test_edit_file_surfaces_line_range_errors() -> None:
             new_string="after\n",
         )
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_file_tools_require_docker_capability() -> None:
+    ctx = AgentContext(task_id="task-1", agent_id="agent-1", workdir="/tmp")
+
+    with pytest.raises(RuntimeError, match="docker capability unavailable"):
+        await read_file.bind(ctx).run(path="/tmp/demo.txt")
