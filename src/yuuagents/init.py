@@ -34,7 +34,7 @@ def _load_service_runtime() -> tuple[Any, Any, Any, Any]:
         config_module = import_module("yuuagents.config")
         yaml_module = import_module("yaml")
         logger = import_module("loguru").logger
-        task_persistence = import_module("yuuagents.persistence").TaskPersistence
+        task_persistence = import_module("yuuagents.persistence").SQLitePersistence
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             service_dependency_message("yuuagents.init.setup()", exc)

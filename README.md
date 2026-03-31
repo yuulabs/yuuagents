@@ -66,11 +66,18 @@ asyncio.run(main())
 ### Stateful agent with streaming
 
 ```python
-from yuuagents import LocalAgent
+from uuid import uuid4
+import yuutools as yt
+from yuuagents import AgentConfig, AgentContext, Session, LocalRun
+from yuuagents.input import conversation_input_from_text
 
-agent = LocalAgent.create(llm=llm, system="You are a concise coding assistant.")
+config = AgentConfig(agent_id="coder", llm=llm, system="You are a concise coding assistant.")
+ctx = AgentContext(task_id=uuid4().hex, agent_id="coder", workdir=".")
+session = Session(config=config, context=ctx)
+agent_input = conversation_input_from_text("List the files in the current directory.")
+session.start(agent_input)
 
-run = agent.start("List the files in the current directory.")
+run = LocalRun(session=session, input=agent_input)
 async for step in run.step_iter():
     print(f"round {step.rounds}  tokens={step.tokens}")
 
@@ -82,19 +89,42 @@ print(result.output_text)
 
 ```python
 import yuutools as yt
-from yuuagents import LocalAgent
+from yuuagents import run_once
 
 @yt.tool(description="Return the current UTC time.")
 async def now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
 
-agent = LocalAgent.create(
-    llm=llm,
-    tools=yt.ToolManager([now]),
+result = await run_once("What time is it?", llm=llm, tools=[now])
+print(result.output_text)
+```
+
+### Multi-agent (delegate tool)
+
+```python
+from yuuagents import AgentConfig, AgentContext, Session, LocalAgentPool, LocalRun
+from yuuagents.input import conversation_input_from_text
+from yuuagents.tools import get as get_builtin_tools
+from uuid import uuid4
+import yuutools as yt
+
+worker_config = AgentConfig(
+    agent_id="worker", llm=llm, system="You are a specialist.",
+    tools=yt.ToolManager(),
 )
-run = agent.start("What time is it?")
-print((await run.result()).output_text)
+pool = LocalAgentPool(agents={"worker": worker_config})
+
+orch_config = AgentConfig(
+    agent_id="orchestrator", llm=llm, system="Delegate to worker.",
+    tools=yt.ToolManager(get_builtin_tools(["delegate", "wait_background"])),
+)
+ctx = AgentContext(task_id=uuid4().hex, agent_id="orchestrator", workdir=".", pool=pool)
+session = Session(config=orch_config, context=ctx)
+agent_input = conversation_input_from_text("Do the task.")
+session.start(agent_input)
+result = await LocalRun(session=session, input=agent_input).result()
+print(result.output_text)
 ```
 
 ---
@@ -281,12 +311,10 @@ Config resolution order (highest wins):
 ## Architecture Overview
 
 ```
-                    ┌─────────────────────────────────────┐
-  SDK path  ──────▶ │  LocalAgent / run_once()            │
-                    │  (in-process, no daemon required)   │
-                    └──────────────┬──────────────────────┘
-                                   │
-                    ┌──────────────▼──────────────────────┐
+  SDK path  ──────▶  Session / run_once()
+                     LocalAgentPool (multi-agent)
+                              │
+                    ┌─────────▼───────────────────────────┐
                     │  core/flow.py                       │
                     │  Flow  ◀──── Agent                  │
                     │  (observable · addressable ·        │
@@ -300,7 +328,7 @@ Config resolution order (highest wins):
             └────────────────────┘   └──────────────────────┘
 ```
 
-**Package dependencies:** `yuubot → yuuagents → {yuullm, yuutools, yuutrace}`
+**Package dependencies:** `yuuagents → {yuullm, yuutools, yuutrace}`
 
 ---
 

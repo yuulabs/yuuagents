@@ -8,7 +8,6 @@ import yuullm
 import yuutools as yt
 
 from yuuagents.agent import AgentConfig
-from yuuagents.capabilities import AgentCapabilities
 from yuuagents.context import AgentContext
 from yuuagents.input import AgentInput, HandoffInput
 from yuuagents.runtime_session import Session
@@ -59,7 +58,7 @@ def _make_llm(*replies: str) -> yuullm.YLLMClient:
     )
 
 
-class _FakeManager:
+class _FakePool:
     def __init__(self) -> None:
         self.started: list[tuple[str, AgentInput, list[str] | None, int]] = []
         self.inspect_calls: list[tuple[str, int]] = []
@@ -68,7 +67,7 @@ class _FakeManager:
         self.input_calls: list[tuple[str, str, bool]] = []
         self.wait_calls: list[list[str]] = []
 
-    async def start_delegate(
+    async def spawn(
         self,
         *,
         parent: Session,
@@ -91,13 +90,13 @@ class _FakeManager:
                 task_id="child-task",
                 agent_id=agent,
                 workdir="",
-                capabilities=AgentCapabilities(delegate=self),
+                pool=self,
             ),
         )
         session.start(input)
         return session
 
-    def inspect_run(
+    def inspect(
         self,
         *,
         parent: Session,
@@ -109,17 +108,17 @@ class _FakeManager:
         self.inspect_calls.append((run_id, limit))
         return f"inspect:{run_id}:{limit}:{max_chars}"
 
-    def cancel_run(self, *, parent: Session, run_id: str) -> str:
+    def cancel(self, *, parent: Session, run_id: str) -> str:
         del parent
         self.cancel_calls.append(run_id)
         return f"cancel:{run_id}"
 
-    def defer_run(self, *, parent: Session, run_id: str, message: str) -> str:
+    def defer(self, *, parent: Session, run_id: str, message: str) -> str:
         del parent
         self.defer_calls.append((run_id, message))
         return f"defer:{run_id}:{message}"
 
-    async def input_run(
+    async def send_input(
         self,
         *,
         parent: Session,
@@ -131,13 +130,13 @@ class _FakeManager:
         self.input_calls.append((run_id, data, append_newline))
         return f"input:{run_id}:{data}:{append_newline}"
 
-    async def wait_runs(self, *, parent: Session, run_ids: list[str]) -> str:
+    async def wait(self, *, parent: Session, run_ids: list[str]) -> str:
         del parent
         self.wait_calls.append(list(run_ids))
         return f"wait:{','.join(run_ids)}"
 
 
-def _make_session(manager: _FakeManager, *, agent_id: str, reply: str) -> Session:
+def _make_session(pool: _FakePool, *, agent_id: str, reply: str) -> Session:
     return Session(
         config=AgentConfig(
             agent_id=agent_id,
@@ -149,7 +148,7 @@ def _make_session(manager: _FakeManager, *, agent_id: str, reply: str) -> Sessio
             task_id=f"{agent_id}-task",
             agent_id=agent_id,
             workdir="",
-            capabilities=AgentCapabilities(delegate=manager),
+            pool=pool,
         ),
     )
 
@@ -162,8 +161,8 @@ def _bind(tool_obj: Any, ctx: AgentContext) -> Any:
 
 @pytest.mark.asyncio
 async def test_delegate_tool_starts_child_session_and_returns_last_text():
-    manager = _FakeManager()
-    parent = _make_session(manager, agent_id="parent", reply="unused")
+    pool = _FakePool()
+    parent = _make_session(pool, agent_id="parent", reply="unused")
     parent.context = parent.context.evolve(session=parent)
 
     result = await _bind(
@@ -177,7 +176,7 @@ async def test_delegate_tool_starts_child_session_and_returns_last_text():
     )
 
     assert result == "delegated done"
-    assert manager.started == [
+    assert pool.started == [
         (
             "run-123",
             HandoffInput(
@@ -191,15 +190,15 @@ async def test_delegate_tool_starts_child_session_and_returns_last_text():
 
 
 @pytest.mark.asyncio
-async def test_background_tools_call_manager():
-    manager = _FakeManager()
-    parent = _make_session(manager, agent_id="parent", reply="unused")
+async def test_background_tools_call_pool():
+    pool = _FakePool()
+    parent = _make_session(pool, agent_id="parent", reply="unused")
 
     ctx = AgentContext(
         task_id="task",
         agent_id="agent",
         workdir="",
-        capabilities=AgentCapabilities(delegate=manager),
+        pool=pool,
         session=parent,
     )
 
@@ -225,16 +224,16 @@ async def test_background_tools_call_manager():
     assert input_result == "input:bg-4:hello:False"
     assert defer_result == "defer:bg-3:please report"
     assert wait_result == "wait:bg-1,bg-3"
-    assert manager.inspect_calls == [("bg-1", 50)]
-    assert manager.cancel_calls == ["bg-2"]
-    assert manager.input_calls == [("bg-4", "hello", False)]
-    assert manager.defer_calls == [("bg-3", "please report")]
-    assert manager.wait_calls == [["bg-1", "bg-3"]]
+    assert pool.inspect_calls == [("bg-1", 50)]
+    assert pool.cancel_calls == ["bg-2"]
+    assert pool.input_calls == [("bg-4", "hello", False)]
+    assert pool.defer_calls == [("bg-3", "please report")]
+    assert pool.wait_calls == [["bg-1", "bg-3"]]
 
 
 @pytest.mark.asyncio
-async def test_delegate_tool_requires_delegate_capability() -> None:
+async def test_delegate_tool_requires_pool_capability() -> None:
     ctx = AgentContext(task_id="task", agent_id="agent", workdir="")
 
-    with pytest.raises(RuntimeError, match="delegate capability unavailable"):
+    with pytest.raises(RuntimeError, match="agent pool unavailable"):
         await _bind(delegate, ctx).run(agent="coder", context="", task="fix bug")

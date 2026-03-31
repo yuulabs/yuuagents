@@ -23,7 +23,8 @@ from yuuagents.input import (
     RolloverInput,
     ScheduledInput,
 )
-from yuuagents.local import LocalAgent, LocalRun, LocalRunResult, run_once
+from yuuagents.local import LocalRun, LocalRunResult, run_once
+from yuuagents.pool import AgentPool
 from yuuagents.core.flow import AgentState
 from yuuagents.runtime_session import Session
 from yuuagents.types import AgentInfo, AgentStatus, StepResult, TaskRequest
@@ -42,12 +43,12 @@ __all__ = [
     "AgentConfig",
     "AgentCapabilities",
     "AgentInput",
+    "AgentPool",
     "AgentState",
     "AgentContext",
     "ConversationInput",
     "DockerCapability",
     "HandoffInput",
-    "LocalAgent",
     "LocalRun",
     "LocalRunResult",
     "RolloverInput",

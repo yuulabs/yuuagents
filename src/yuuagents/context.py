@@ -10,6 +10,7 @@ from yuuagents.capabilities import AgentCapabilities
 
 if TYPE_CHECKING:
     from yuuagents.core.flow import Flow
+    from yuuagents.pool import AgentPool
     from yuuagents.runtime_session import Session
 
 
@@ -49,6 +50,7 @@ class AgentContext:
     task_id: str
     agent_id: str
     workdir: str
+    pool: AgentPool | None = None
     capabilities: AgentCapabilities = field(factory=AgentCapabilities)
     delegate_depth: int = 0
     session: Session | None = None
@@ -61,6 +63,7 @@ class AgentContext:
         task_id: str | object = _MISSING,
         agent_id: str | object = _MISSING,
         workdir: str | object = _MISSING,
+        pool: AgentPool | None | object = _MISSING,
         capabilities: AgentCapabilities | object = _MISSING,
         delegate_depth: int | object = _MISSING,
         session: Session | None | object = _MISSING,
@@ -71,6 +74,7 @@ class AgentContext:
             task_id=_replace(self.task_id, task_id),
             agent_id=_replace(self.agent_id, agent_id),
             workdir=_replace(self.workdir, workdir),
+            pool=_replace(self.pool, pool),
             capabilities=_replace(self.capabilities, capabilities),
             delegate_depth=_replace(self.delegate_depth, delegate_depth),
             session=_replace(self.session, session),

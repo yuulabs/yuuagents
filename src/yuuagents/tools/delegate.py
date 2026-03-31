@@ -11,7 +11,8 @@ from yuullm.types import is_text_item
 from yuuagents.context import (
     DelegateDepthExceededError,
 )
-from yuuagents.capabilities import DelegateManager, require_delegate_manager
+from yuuagents.capabilities import require_agent_pool
+from yuuagents.pool import AgentPool
 from yuuagents.input import HandoffInput
 from yuuagents.runtime_session import Session
 from yuuagents.types import AgentStatus
@@ -45,7 +46,7 @@ async def delegate(
     context: str,
     task: str,
     tools: list[str] | None = None,
-    manager: DelegateManager = yt.depends(require_delegate_manager),
+    pool: AgentPool = yt.depends(require_agent_pool),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
     parent_run_id: str = yt.depends(lambda ctx: ctx.current_run_id),
     delegate_depth: int = yt.depends(lambda ctx: ctx.delegate_depth),
@@ -65,7 +66,7 @@ async def delegate(
         context=[yuullm.user(context.strip())] if context.strip() else [],
         task=[yuullm.user(task.strip())] if task.strip() else [],
     )
-    child = await manager.start_delegate(
+    child = await pool.spawn(
         parent=parent,
         parent_run_id=parent_run_id,
         agent=agent,

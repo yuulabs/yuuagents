@@ -66,9 +66,19 @@ async def serve(config: Config) -> None:
         service_name="yuuagents",
     )
 
+    from yuuagents.persistence import SQLitePersistence
+
     docker = _make_docker_manager(config.docker.image)
-    manager = AgentManager(config=config, docker=docker, db_url=config.db_url)
-    await manager.start()
+    persistence = SQLitePersistence(
+        db_url=config.db_url,
+        snapshot_enabled=config.snapshot.enabled,
+    )
+    manager = AgentManager(
+        config=config,
+        docker=docker,
+        persistence=persistence,
+    )
+    await manager.setup()
 
     server: uvicorn.Server | None = None
 

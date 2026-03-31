@@ -7,15 +7,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import attrs
 import yuullm
 import yuutools as yt
 from attrs import define, field
 from yuullm.types import is_text_item
 
 from yuuagents.agent import AgentConfig
-from yuuagents.capabilities import AgentCapabilities
 from yuuagents.context import AgentContext
+from yuuagents.pool import AgentPool
 from yuuagents.core.flow import AgentState
 from yuuagents.input import AgentInput, conversation_input_from_text
 from yuuagents.runtime_session import Session
@@ -52,24 +51,9 @@ def _last_assistant_text(messages: list[yuullm.Message]) -> str:
     return ""
 
 
-def _build_context(
-    *,
-    agent_id: str,
-    workdir: str,
-    capabilities: AgentCapabilities,
-    task_id: str | None,
-    context: AgentContext | None,
-) -> AgentContext:
-    if context is not None:
-        if task_id is None:
-            return context
-        return context.evolve(task_id=task_id)
-    return AgentContext(
-        task_id=task_id or uuid4().hex,
-        agent_id=agent_id,
-        workdir=workdir,
-        capabilities=capabilities,
-    )
+# ---------------------------------------------------------------------------
+# LocalRunResult / LocalRun
+# ---------------------------------------------------------------------------
 
 
 @define(frozen=True)
@@ -141,80 +125,6 @@ class LocalRun:
         )
 
 
-@define
-class LocalAgent:
-    """Thin SDK wrapper for local agent development."""
-
-    llm: yuullm.YLLMClient
-    tools: yt.ToolManager[Any] = field(factory=yt.ToolManager, converter=_coerce_tools)
-    agent_id: str = "local"
-    system: str = ""
-    workdir: str = field(factory=_default_workdir)
-    capabilities: AgentCapabilities = field(factory=AgentCapabilities)
-    tool_batch_timeout: float = 0
-
-    @classmethod
-    def create(
-        cls,
-        *,
-        llm: yuullm.YLLMClient,
-        tools: yt.ToolManager[Any] | Iterable[yt.Tool[Any]] | None = None,
-        agent_id: str = "local",
-        system: str = "",
-        workdir: str | None = None,
-        capabilities: AgentCapabilities | None = None,
-        tool_batch_timeout: float = 0,
-    ) -> LocalAgent:
-        return cls(
-            llm=llm,
-            tools=_coerce_tools(tools),
-            agent_id=agent_id,
-            system=system,
-            workdir=workdir or _default_workdir(),
-            capabilities=capabilities or AgentCapabilities(),
-            tool_batch_timeout=tool_batch_timeout,
-        )
-
-    def start(
-        self,
-        task: str | AgentInput,
-        *,
-        task_id: str | None = None,
-        context: AgentContext | None = None,
-    ) -> LocalRun:
-        """Prepare a local run and start the underlying session."""
-        agent_input = _coerce_input(task)
-        ctx = _build_context(
-            agent_id=self.agent_id,
-            workdir=self.workdir,
-            capabilities=attrs.evolve(self.capabilities),
-            task_id=task_id,
-            context=context,
-        )
-        session = Session(
-            config=AgentConfig(
-                agent_id=self.agent_id,
-                tools=self.tools,
-                llm=self.llm,
-                system=self.system,
-                tool_batch_timeout=self.tool_batch_timeout,
-            ),
-            context=ctx,
-        )
-        session.start(agent_input)
-        return LocalRun(session=session, input=agent_input)
-
-    async def run(
-        self,
-        task: str | AgentInput,
-        *,
-        task_id: str | None = None,
-        context: AgentContext | None = None,
-    ) -> LocalRunResult:
-        """Run a local task to completion and return the final result."""
-        return await self.start(task, task_id=task_id, context=context).result()
-
-
 async def run_once(
     task: str | AgentInput,
     *,
@@ -223,19 +133,33 @@ async def run_once(
     agent_id: str = "local",
     system: str = "",
     workdir: str | None = None,
-    capabilities: AgentCapabilities | None = None,
+    pool: AgentPool | None = None,
     task_id: str | None = None,
     context: AgentContext | None = None,
     tool_batch_timeout: float = 0,
 ) -> LocalRunResult:
-    """Convenience helper for the pure SDK path."""
-    agent = LocalAgent.create(
-        llm=llm,
-        tools=tools,
+    """Convenience helper for the pure SDK path.
+
+    For multi-agent use, pass an :class:`AgentPool` as *pool*.
+    """
+    agent_input = _coerce_input(task)
+    actual_pool = pool if pool is not None else AgentPool()
+    config = AgentConfig(
         agent_id=agent_id,
+        tools=_coerce_tools(tools),
+        llm=llm,
         system=system,
-        workdir=workdir,
-        capabilities=capabilities,
         tool_batch_timeout=tool_batch_timeout,
     )
-    return await agent.run(task, task_id=task_id, context=context)
+    if context is not None:
+        ctx = context if task_id is None else context.evolve(task_id=task_id)
+    else:
+        ctx = AgentContext(
+            task_id=task_id or uuid4().hex,
+            agent_id=agent_id,
+            workdir=workdir or _default_workdir(),
+            pool=actual_pool,
+        )
+    session = Session(config=config, context=ctx)
+    session.start(agent_input)
+    return await LocalRun(session=session, input=agent_input).result()

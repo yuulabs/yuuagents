@@ -6,8 +6,11 @@ import pytest
 import yuullm
 import yuutools as yt
 
-from yuuagents.input import ConversationInput
-from yuuagents.local import LocalAgent, run_once
+from yuuagents.agent import AgentConfig
+from yuuagents.context import AgentContext
+from yuuagents.input import ConversationInput, conversation_input_from_text
+from yuuagents.local import LocalRun, run_once
+from yuuagents.runtime_session import Session
 
 
 class FakeProvider:
@@ -72,7 +75,7 @@ async def test_run_once_builds_local_session_automatically(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_agent_step_iter_exposes_progress_and_final_result(tmp_path) -> None:
+async def test_local_run_step_iter_exposes_progress_and_final_result(tmp_path) -> None:
     client = make_client(
         [
             [yuullm.ToolCall(id="call-1", name="noop", arguments="{}")],
@@ -84,15 +87,18 @@ async def test_local_agent_step_iter_exposes_progress_and_final_result(tmp_path)
     async def noop() -> str:
         return "ok"
 
-    agent = LocalAgent.create(
-        llm=client,
-        tools=[noop],
-        workdir=str(tmp_path),
-        system="test system",
+    config = AgentConfig(
         agent_id="sdk-agent",
+        tools=yt.ToolManager([noop]),
+        llm=client,
+        system="test system",
     )
+    ctx = AgentContext(task_id="test-task", agent_id="sdk-agent", workdir=str(tmp_path))
+    session = Session(config=config, context=ctx)
+    agent_input = conversation_input_from_text("do work")
+    session.start(agent_input)
+    run = LocalRun(session=session, input=agent_input)
 
-    run = agent.start("do work")
     steps = [step async for step in run.step_iter()]
     result = await run.result()
 
@@ -108,7 +114,12 @@ async def test_local_run_requires_step_iter_to_finish_before_result() -> None:
     client = make_client(
         [[yuullm.Response(item={"type": "text", "text": "hello"})]]
     )
-    run = LocalAgent.create(llm=client).start("hello")
+    config = AgentConfig(agent_id="local", tools=yt.ToolManager(), llm=client, system="")
+    ctx = AgentContext(task_id="test", agent_id="local", workdir=".")
+    session = Session(config=config, context=ctx)
+    agent_input = conversation_input_from_text("hello")
+    session.start(agent_input)
+    run = LocalRun(session=session, input=agent_input)
 
     iterator = run.step_iter()
     await anext(iterator)

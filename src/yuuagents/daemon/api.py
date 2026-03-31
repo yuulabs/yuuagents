@@ -108,7 +108,7 @@ def create_app(
     async def delete_agent(request: Request) -> Response:
         task_id = request.path_params["task_id"]
         try:
-            await manager.cancel(task_id)
+            await manager.cancel_task(task_id)
         except KeyError:
             return _json({"error": "not found"}, status=404)
         return _json({"ok": True})

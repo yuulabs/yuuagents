@@ -413,13 +413,13 @@ def install(
 def _init_database(db_url: str) -> None:
     """Create database tables (idempotent).
 
-    Uses :class:`TaskPersistence` to run ``CREATE TABLE IF NOT EXISTS``
+    Uses :class:`SQLitePersistence` to run ``CREATE TABLE IF NOT EXISTS``
     via SQLAlchemy's ``metadata.create_all``.
     """
-    from yuuagents.persistence import TaskPersistence
+    from yuuagents.persistence import SQLitePersistence
 
     async def _run() -> None:
-        p = TaskPersistence(db_url=db_url)
+        p = SQLitePersistence(db_url=db_url)
         await p.start()
         await p.stop()
 

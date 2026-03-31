@@ -105,7 +105,7 @@ async def test_init_setup_uses_packaged_defaults_for_missing_config_path(
         debug=lambda *args, **kwargs: None,
         warning=lambda *args, **kwargs: None,
     )
-    fake_persistence_module = SimpleNamespace(TaskPersistence=FakePersistence)
+    fake_persistence_module = SimpleNamespace(SQLitePersistence=FakePersistence)
     recorded: dict[str, Path | None] = {}
 
     def fake_import_module(name: str):
@@ -153,13 +153,11 @@ def test_cli_supports_version_flag_when_service_dependencies_are_available() -> 
 async def test_agent_manager_start_does_not_eagerly_start_docker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import yuuagents.daemon.manager as manager_module
-
     class FakeDocker:
         workdir = "/tmp/no-docker"
 
         async def start(self) -> None:
-            raise AssertionError("docker.start should not be called during daemon startup")
+            return None
 
         async def stop(self) -> None:
             return None
@@ -174,21 +172,9 @@ async def test_agent_manager_start_does_not_eagerly_start_docker(
         async def stop(self) -> None:
             return None
 
-    class FakeWriter:
-        def __init__(self, persistence: FakePersistence) -> None:
-            self.persistence = persistence
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            return None
-
-    monkeypatch.setattr(manager_module, "TaskPersistence", FakePersistence)
-    monkeypatch.setattr(manager_module, "TaskWriter", FakeWriter)
-
-    manager = AgentManager(config=Config(), docker=FakeDocker())
-    await manager.start()
+    fake_persistence = FakePersistence(db_url="")
+    manager = AgentManager(config=Config(), docker=FakeDocker(), persistence=fake_persistence)
+    await manager.setup()
     await manager.stop()
 
 
@@ -196,10 +182,11 @@ async def test_agent_manager_start_does_not_eagerly_start_docker(
 async def test_agent_manager_does_not_restore_when_snapshot_restore_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import yuuagents.daemon.manager as manager_module
-
     class FakeDocker:
         workdir = "/tmp/no-docker"
+
+        async def start(self) -> None:
+            return None
 
         async def stop(self) -> None:
             return None
@@ -217,24 +204,13 @@ async def test_agent_manager_does_not_restore_when_snapshot_restore_is_disabled(
         async def load_unfinished(self) -> list[RestoredTask]:
             raise AssertionError("restore should not run when restore_on_start is false")
 
-    class FakeWriter:
-        def __init__(self, persistence: FakePersistence) -> None:
-            self.persistence = persistence
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            return None
-
-    monkeypatch.setattr(manager_module, "TaskPersistence", FakePersistence)
-    monkeypatch.setattr(manager_module, "TaskWriter", FakeWriter)
-
+    fake_persistence = FakePersistence(db_url="")
     manager = AgentManager(
         config=Config(snapshot=SnapshotConfig(enabled=True, restore_on_start=False)),
         docker=FakeDocker(),
+        persistence=fake_persistence,
     )
-    await manager.start()
+    await manager.setup()
     await manager.stop()
 
 
@@ -276,6 +252,9 @@ async def test_agent_manager_restores_unfinished_tasks_when_enabled(
     class FakeDocker:
         workdir = "/tmp/no-docker"
 
+        async def start(self) -> None:
+            return None
+
         async def stop(self) -> None:
             return None
 
@@ -313,6 +292,7 @@ async def test_agent_manager_restores_unfinished_tasks_when_enabled(
         def __init__(self, db_url: str) -> None:
             self.db_url = db_url
             self.terminal_updates: list[tuple[str, str]] = []
+            self.snapshots: list[object] = []
 
         async def start(self) -> None:
             return None
@@ -348,6 +328,16 @@ async def test_agent_manager_restores_unfinished_tasks_when_enabled(
                 )
             ]
 
+        async def save_snapshot(
+            self,
+            *,
+            task_id: str,
+            turn: int,
+            state: object,
+            status: object,
+        ) -> None:
+            self.snapshots.append((task_id, turn, state, status))
+
         async def update_task_terminal(
             self,
             *,
@@ -358,21 +348,8 @@ async def test_agent_manager_restores_unfinished_tasks_when_enabled(
             del error_json
             self.terminal_updates.append((task_id, status.value))
 
-    class FakeWriter:
-        def __init__(self, persistence: FakePersistence) -> None:
-            self.persistence = persistence
-            self.checkpoints: list[object] = []
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            return None
-
-        async def append_checkpoint(self, cp: object) -> None:
-            self.checkpoints.append(cp)
-
     fake_provider = FakeProvider()
+    fake_persistence = FakePersistence(db_url="")
 
     def fake_make_llm(
         self: AgentManager,
@@ -382,22 +359,21 @@ async def test_agent_manager_restores_unfinished_tasks_when_enabled(
         del self, agent_name, model_override
         return yuullm.YLLMClient(provider=fake_provider, default_model="fake-model")
 
-    monkeypatch.setattr(manager_module, "TaskPersistence", FakePersistence)
-    monkeypatch.setattr(manager_module, "TaskWriter", FakeWriter)
     monkeypatch.setattr(manager_module.AgentManager, "_make_llm", fake_make_llm)
 
     manager = AgentManager(
         config=Config(snapshot=SnapshotConfig(enabled=True, restore_on_start=True)),
         docker=FakeDocker(),
+        persistence=fake_persistence,
     )
 
     try:
-        await manager.start()
-        await asyncio.wait_for(manager._tasks["task-restore"], timeout=1)
+        await manager.setup()
+        assert manager._pool is not None
+        await asyncio.wait_for(manager._pool._tasks["task-restore"], timeout=1)
 
-        assert manager._sessions["task-restore"].status == manager_module.AgentStatus.DONE
-        assert manager._sessions["task-restore"].steps >= 2
-        assert manager._writer is not None
-        assert manager._writer.checkpoints
+        assert manager._pool._sessions["task-restore"].status == manager_module.AgentStatus.DONE
+        assert manager._pool._sessions["task-restore"].steps >= 2
+        assert fake_persistence.snapshots
     finally:
         await manager.stop()

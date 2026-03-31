@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import msgspec
 from attrs import define, field
@@ -39,6 +39,204 @@ from yuuagents.types import AgentInfo, AgentStatus, ErrorInfo
 Phase = Literal["snapshot"]
 
 _json_encoder = msgspec.json.Encoder()
+
+
+# ---------------------------------------------------------------------------
+# Shared DTO
+# ---------------------------------------------------------------------------
+
+
+@define(frozen=True)
+class RestoredTask:
+    task_id: str
+    agent_id: str
+    persona: str
+    input: AgentInput
+    system_prompt: str
+    model: str
+    tools: list[str]
+    docker_container: str
+    status: AgentStatus
+    created_at: datetime
+    head_turn: int
+    state: AgentState | None
+
+
+# ---------------------------------------------------------------------------
+# Persistence protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class Persistence(Protocol):
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+
+    async def create_task(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        persona: str,
+        input: AgentInput,
+        system_prompt: str,
+        model: str,
+        tools: list[str],
+        docker_container: str,
+        created_at: datetime,
+    ) -> None: ...
+
+    async def save_snapshot(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        state: AgentState,
+        status: AgentStatus,
+    ) -> None: ...
+
+    async def update_task_terminal(
+        self,
+        *,
+        task_id: str,
+        status: AgentStatus,
+        error_json: bytes | None,
+    ) -> None: ...
+
+    async def list_tasks(self) -> list[AgentInfo]: ...
+
+    async def get_task_info(self, task_id: str) -> AgentInfo | None: ...
+
+    async def load_history(self, task_id: str) -> list[Any]: ...
+
+    async def load_unfinished(self) -> list[RestoredTask]: ...
+
+
+# ---------------------------------------------------------------------------
+# EphemeralPersistence — in-memory, process lifetime
+# ---------------------------------------------------------------------------
+
+
+@define
+class _EphemeralRecord:
+    task_id: str
+    agent_id: str
+    persona: str
+    input_kind: str
+    input_preview: str
+    status: AgentStatus
+    created_at: datetime
+    error_json: bytes | None = None
+
+
+@define
+class EphemeralPersistence:
+    """In-memory persistence. Survives within a process; lost on restart."""
+
+    _records: dict[str, _EphemeralRecord] = field(factory=dict)
+    _snapshots: dict[str, AgentState] = field(factory=dict)
+
+    async def start(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def create_task(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        persona: str,
+        input: AgentInput,
+        system_prompt: str,
+        model: str,
+        tools: list[str],
+        docker_container: str,
+        created_at: datetime,
+    ) -> None:
+        del input, system_prompt, model, tools, docker_container
+        self._records[task_id] = _EphemeralRecord(
+            task_id=task_id,
+            agent_id=agent_id,
+            persona=persona,
+            input_kind="",
+            input_preview="",
+            status=AgentStatus.RUNNING,
+            created_at=created_at,
+        )
+
+    async def save_snapshot(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        state: AgentState,
+        status: AgentStatus,
+    ) -> None:
+        del turn
+        self._snapshots[task_id] = state
+        record = self._records.get(task_id)
+        if record is not None:
+            record.status = status
+
+    async def update_task_terminal(
+        self,
+        *,
+        task_id: str,
+        status: AgentStatus,
+        error_json: bytes | None,
+    ) -> None:
+        record = self._records.get(task_id)
+        if record is not None:
+            record.status = status
+            record.error_json = error_json
+
+    async def list_tasks(self) -> list[AgentInfo]:
+        return [self._to_info(r) for r in self._records.values()]
+
+    async def get_task_info(self, task_id: str) -> AgentInfo | None:
+        record = self._records.get(task_id)
+        if record is None:
+            return None
+        return self._to_info(record)
+
+    async def load_history(self, task_id: str) -> list[Any]:
+        state = self._snapshots.get(task_id)
+        if state is None:
+            raise KeyError(task_id)
+        return list(state.messages)
+
+    async def load_unfinished(self) -> list[RestoredTask]:
+        # Process just started; in-memory state is empty — nothing to restore.
+        return []
+
+    def _to_info(self, r: _EphemeralRecord) -> AgentInfo:
+        err: ErrorInfo | None = None
+        if r.error_json is not None:
+            err = msgspec.json.decode(r.error_json, type=ErrorInfo)
+        return AgentInfo(
+            task_id=r.task_id,
+            agent_id=r.agent_id,
+            persona=r.persona[:80],
+            input_kind=r.input_kind,
+            input_preview=r.input_preview,
+            status=r.status.value,
+            created_at=r.created_at.isoformat(),
+            last_assistant_message="",
+            steps=0,
+            total_tokens=0,
+            last_usage=None,
+            total_usage=None,
+            last_cost_usd=0.0,
+            total_cost_usd=0.0,
+            error=err,
+        )
+
+
+# ---------------------------------------------------------------------------
+# SQLitePersistence — disk-backed, survives restarts
+# ---------------------------------------------------------------------------
 
 
 class _Base(DeclarativeBase):
@@ -90,26 +288,129 @@ Index(
 
 
 @define(frozen=True)
-class RestoredTask:
+class _BufferedCheckpoint:
     task_id: str
-    agent_id: str
-    persona: str
-    input: AgentInput
-    system_prompt: str
-    model: str
-    tools: list[str]
-    docker_container: str
-    status: AgentStatus
-    created_at: datetime
-    head_turn: int
-    state: AgentState | None
+    turn: int
+    phase: Phase
+    ts: datetime
+    payload: bytes
+    status_after: AgentStatus
 
 
 @define
-class TaskPersistence:
+class _TaskWriter:
+    """Buffered async writer for checkpoint rows."""
+
+    _db: SQLitePersistence
+    _queue: asyncio.Queue[object] = field(factory=asyncio.Queue)
+    _task: asyncio.Task[None] | None = None
+    _stopping: bool = False
+
+    async def start(self) -> None:
+        assert self._task is None
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._stopping = True
+        await self._queue.put(None)
+        await self._task
+        self._task = None
+        self._stopping = False
+
+    async def append(self, cp: _BufferedCheckpoint) -> None:
+        await self._queue.put(cp)
+
+    async def _run(self) -> None:
+        buffer: list[_BufferedCheckpoint] = []
+        bytes_total = 0
+        last_flush = asyncio.get_running_loop().time()
+
+        async def _flush() -> None:
+            nonlocal buffer, bytes_total, last_flush
+            if not buffer:
+                return
+
+            task_updates: dict[str, tuple[int, str, datetime]] = {}
+            values = []
+            for cp in buffer:
+                values.append(
+                    {
+                        "task_id": cp.task_id,
+                        "turn": cp.turn,
+                        "phase": cp.phase,
+                        "ts": cp.ts,
+                        "payload": cp.payload,
+                    }
+                )
+                prev = task_updates.get(cp.task_id)
+                head = cp.turn if prev is None else max(prev[0], cp.turn)
+                task_updates[cp.task_id] = (head, cp.status_after.value, cp.ts)
+
+            insert_stmt = sqlite_insert(TaskCheckpointRow).values(values)
+            insert_stmt = insert_stmt.on_conflict_do_nothing(
+                index_elements=[
+                    TaskCheckpointRow.task_id,
+                    TaskCheckpointRow.turn,
+                    TaskCheckpointRow.phase,
+                ]
+            )
+
+            async with self._db._session()() as session:  # noqa: SLF001
+                async with session.begin():
+                    await session.execute(insert_stmt)
+                    for task_id, (head_turn, status, ts) in task_updates.items():
+                        await session.execute(
+                            update(TaskRow)
+                            .where(TaskRow.task_id == task_id)
+                            .values(head_turn=head_turn, updated_at=ts)
+                        )
+                        await session.execute(
+                            update(TaskRow)
+                            .where(TaskRow.task_id == task_id)
+                            .values(status=status)
+                        )
+
+            buffer = []
+            bytes_total = 0
+            last_flush = asyncio.get_running_loop().time()
+
+        while True:
+            timeout = 0.3
+            try:
+                item = await asyncio.wait_for(self._queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                item = "timeout"
+
+            if item is None:
+                await _flush()
+                if self._stopping:
+                    return
+                continue
+
+            if item == "timeout":
+                await _flush()
+                continue
+
+            assert isinstance(item, _BufferedCheckpoint)
+            buffer.append(item)
+            bytes_total += len(item.payload)
+
+            elapsed = asyncio.get_running_loop().time() - last_flush
+            if len(buffer) >= 200 or bytes_total >= 1024 * 1024 or elapsed >= 0.3:
+                await _flush()
+
+
+@define
+class SQLitePersistence:
+    """Disk-backed persistence. Survives process restarts."""
+
     db_url: str
+    snapshot_enabled: bool = True
     _engine: AsyncEngine | None = None
     _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+    _writer: _TaskWriter | None = None
 
     async def start(self) -> None:
         assert self._engine is None
@@ -117,8 +418,14 @@ class TaskPersistence:
         self._sessionmaker = async_sessionmaker(self._engine, expire_on_commit=False)
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
+        if self.snapshot_enabled:
+            self._writer = _TaskWriter(self)
+            await self._writer.start()
 
     async def stop(self) -> None:
+        if self._writer is not None:
+            await self._writer.stop()
+            self._writer = None
         if self._engine is None:
             return
         await self._engine.dispose()
@@ -164,6 +471,26 @@ class TaskPersistence:
         async with self._session()() as session:
             async with session.begin():
                 await session.execute(stmt)
+
+    async def save_snapshot(
+        self,
+        *,
+        task_id: str,
+        turn: int,
+        state: AgentState,
+        status: AgentStatus,
+    ) -> None:
+        if self._writer is None:
+            return
+        cp = _BufferedCheckpoint(
+            task_id=task_id,
+            turn=turn,
+            phase="snapshot",
+            ts=datetime.now(timezone.utc),
+            payload=msgspec.json.encode(state),
+            status_after=status,
+        )
+        await self._writer.append(cp)
 
     async def update_task_terminal(
         self,
@@ -215,41 +542,39 @@ class TaskPersistence:
             )
         return infos
 
-    async def get_task_row(self, task_id: str) -> TaskRow | None:
-        async with self._session()() as session:
-            row = (
-                await session.execute(select(TaskRow).where(TaskRow.task_id == task_id))
-            ).scalar_one_or_none()
-        return row
+    async def get_task_info(self, task_id: str) -> AgentInfo | None:
+        row = await self._get_task_row(task_id)
+        if row is None:
+            return None
+        err: ErrorInfo | None = None
+        if row.error_json is not None:
+            err = msgspec.json.decode(row.error_json, type=ErrorInfo)
+        return AgentInfo(
+            task_id=row.task_id,
+            agent_id=row.agent_id,
+            persona=row.persona[:80],
+            input_kind=row.input_kind,
+            input_preview=row.input_preview,
+            status=row.status,
+            created_at=row.created_at.isoformat(),
+            last_assistant_message="",
+            steps=row.head_turn,
+            total_tokens=0,
+            last_usage=None,
+            total_usage=None,
+            last_cost_usd=0.0,
+            total_cost_usd=0.0,
+            error=err,
+        )
 
     async def load_history(self, task_id: str) -> list[Any]:
-        row = await self.get_task_row(task_id)
+        row = await self._get_task_row(task_id)
         if row is None:
             raise KeyError(task_id)
-        state = await self.load_state(task_id)
+        state = await self._load_state(task_id)
         if state is None:
             return []
         return list(state.messages)
-
-    async def load_state(self, task_id: str) -> AgentState | None:
-        async with self._session()() as session:
-            snapshot = (
-                await session.execute(
-                    select(TaskCheckpointRow)
-                    .where(
-                        (TaskCheckpointRow.task_id == task_id)
-                        & (TaskCheckpointRow.phase == "snapshot")
-                    )
-                    .order_by(TaskCheckpointRow.turn.desc())
-                    .limit(1)
-                )
-            ).scalar_one_or_none()
-        if snapshot is None:
-            return None
-        try:
-            return msgspec.json.decode(snapshot.payload, type=AgentState)
-        except msgspec.ValidationError:
-            return None
 
     async def load_unfinished(self) -> list[RestoredTask]:
         async with self._session()() as session:
@@ -273,7 +598,7 @@ class TaskPersistence:
         restored: list[RestoredTask] = []
         for r in rows:
             tools = msgspec.json.decode(r.tools_json, type=list[str])
-            state = await self.load_state(r.task_id)
+            state = await self._load_state(r.task_id)
             restored.append(
                 RestoredTask(
                     task_id=r.task_id,
@@ -292,120 +617,36 @@ class TaskPersistence:
             )
         return restored
 
+    async def _get_task_row(self, task_id: str) -> TaskRow | None:
+        async with self._session()() as session:
+            row = (
+                await session.execute(select(TaskRow).where(TaskRow.task_id == task_id))
+            ).scalar_one_or_none()
+        return row
 
-@define(frozen=True)
-class _BufferedCheckpoint:
-    task_id: str
-    turn: int
-    phase: Phase
-    ts: datetime
-    payload: bytes
-    status_after: AgentStatus
-
-
-@define
-class TaskWriter:
-    persistence: TaskPersistence
-    _queue: asyncio.Queue[object] = field(factory=asyncio.Queue)
-    _task: asyncio.Task[None] | None = None
-    _stopping: bool = False
-
-    async def start(self) -> None:
-        assert self._task is None
-        self._task = asyncio.create_task(self._run())
-
-    async def flush(self) -> None:
-        if self._task is None:
-            return
-        await self._queue.put(None)
-
-    async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._stopping = True
-        await self._queue.put(None)
-        await self._task
-        self._task = None
-        self._stopping = False
-
-    async def append_checkpoint(self, cp: _BufferedCheckpoint) -> None:
-        await self._queue.put(cp)
-
-    async def _run(self) -> None:
-        buffer: list[_BufferedCheckpoint] = []
-        bytes_total = 0
-        last_flush = asyncio.get_running_loop().time()
-
-        async def _flush() -> None:
-            nonlocal buffer, bytes_total, last_flush
-            if not buffer:
-                return
-
-            task_updates: dict[str, tuple[int, str, datetime]] = {}
-            values = []
-            for cp in buffer:
-                values.append(
-                    {
-                        "task_id": cp.task_id,
-                        "turn": cp.turn,
-                        "phase": cp.phase,
-                        "ts": cp.ts,
-                        "payload": cp.payload,
-                    }
+    async def _load_state(self, task_id: str) -> AgentState | None:
+        async with self._session()() as session:
+            snapshot = (
+                await session.execute(
+                    select(TaskCheckpointRow)
+                    .where(
+                        (TaskCheckpointRow.task_id == task_id)
+                        & (TaskCheckpointRow.phase == "snapshot")
+                    )
+                    .order_by(TaskCheckpointRow.turn.desc())
+                    .limit(1)
                 )
-                prev = task_updates.get(cp.task_id)
-                head = cp.turn if prev is None else max(prev[0], cp.turn)
-                task_updates[cp.task_id] = (head, cp.status_after.value, cp.ts)
+            ).scalar_one_or_none()
+        if snapshot is None:
+            return None
+        try:
+            return msgspec.json.decode(snapshot.payload, type=AgentState)
+        except msgspec.ValidationError:
+            return None
 
-            insert_stmt = sqlite_insert(TaskCheckpointRow).values(values)
-            insert_stmt = insert_stmt.on_conflict_do_nothing(
-                index_elements=[
-                    TaskCheckpointRow.task_id,
-                    TaskCheckpointRow.turn,
-                    TaskCheckpointRow.phase,
-                ]
-            )
 
-            async with self.persistence._session()() as session:  # noqa: SLF001
-                async with session.begin():
-                    await session.execute(insert_stmt)
-                    for task_id, (head_turn, status, ts) in task_updates.items():
-                        await session.execute(
-                            update(TaskRow)
-                            .where(TaskRow.task_id == task_id)
-                            .values(head_turn=head_turn, updated_at=ts)
-                        )
-                        await session.execute(
-                            update(TaskRow)
-                            .where(TaskRow.task_id == task_id)
-                            .values(status=status)
-                        )
+# ---------------------------------------------------------------------------
+# Back-compat alias — remove after all callers are updated
+# ---------------------------------------------------------------------------
 
-            buffer = []
-            bytes_total = 0
-            last_flush = asyncio.get_running_loop().time()
-
-        while True:
-            timeout = 0.3
-            try:
-                item = await asyncio.wait_for(self._queue.get(), timeout=timeout)
-            except asyncio.TimeoutError:
-                item = "timeout"
-
-            if item is None:
-                await _flush()
-                if self._stopping:
-                    return
-                continue
-
-            if item == "timeout":
-                await _flush()
-                continue
-
-            assert isinstance(item, _BufferedCheckpoint)
-            buffer.append(item)
-            bytes_total += len(item.payload)
-
-            elapsed = asyncio.get_running_loop().time() - last_flush
-            if len(buffer) >= 200 or bytes_total >= 1024 * 1024 or elapsed >= 0.3:
-                await _flush()
+TaskPersistence = SQLitePersistence

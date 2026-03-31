@@ -6,7 +6,8 @@ import asyncio
 
 import yuutools as yt
 
-from yuuagents.capabilities import DelegateManager, require_delegate_manager
+from yuuagents.capabilities import require_agent_pool
+from yuuagents.pool import AgentPool
 from yuuagents.runtime_session import Session
 
 
@@ -40,12 +41,12 @@ async def inspect_background(
     run_id: str,
     limit: int = 200,
     max_chars: int = 4000,
-    manager: DelegateManager = yt.depends(require_delegate_manager),
+    pool: AgentPool = yt.depends(require_agent_pool),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if parent is None:
         raise RuntimeError("background tools require an active session")
-    return manager.inspect_run(
+    return pool.inspect(
         parent=parent,
         run_id=run_id,
         limit=limit,
@@ -61,17 +62,17 @@ async def inspect_background(
 )
 async def cancel_background(
     run_id: str,
-    manager: DelegateManager = yt.depends(require_delegate_manager),
+    pool: AgentPool = yt.depends(require_agent_pool),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if parent is None:
         raise RuntimeError("background tools require an active session")
-    return manager.cancel_run(parent=parent, run_id=run_id)
+    return pool.cancel(parent=parent, run_id=run_id)
 
 
 @yt.tool(
     params={
-        "run_id": "Background run id of a deferred run.",
+        "run_id": "Background run id returned by a deferred tool.",
         "data": (
             "Input to send into the background run. "
             "For bash this behaves like stdin/terminal input. For delegate it sends a normal message."
@@ -87,12 +88,12 @@ async def input_background(
     run_id: str,
     data: str,
     append_newline: bool = True,
-    manager: DelegateManager = yt.depends(require_delegate_manager),
+    pool: AgentPool = yt.depends(require_agent_pool),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if parent is None:
         raise RuntimeError("background tools require an active session")
-    return await manager.input_run(
+    return await pool.send_input(
         parent=parent,
         run_id=run_id,
         data=data,
@@ -116,12 +117,12 @@ async def input_background(
 async def defer_background(
     run_id: str,
     message: str = "",
-    manager: DelegateManager = yt.depends(require_delegate_manager),
+    pool: AgentPool = yt.depends(require_agent_pool),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if parent is None:
         raise RuntimeError("background tools require an active session")
-    return manager.defer_run(parent=parent, run_id=run_id, message=message)
+    return pool.defer(parent=parent, run_id=run_id, message=message)
 
 
 @yt.tool(
@@ -135,9 +136,9 @@ async def defer_background(
 )
 async def wait_background(
     run_ids: list[str],
-    manager: DelegateManager = yt.depends(require_delegate_manager),
+    pool: AgentPool = yt.depends(require_agent_pool),
     parent: Session | None = yt.depends(lambda ctx: ctx.session),
 ) -> str:
     if parent is None:
         raise RuntimeError("background tools require an active session")
-    return await manager.wait_runs(parent=parent, run_ids=run_ids)
+    return await pool.wait(parent=parent, run_ids=run_ids)
