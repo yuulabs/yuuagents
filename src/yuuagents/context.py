@@ -10,8 +10,6 @@ from yuuagents.capabilities import AgentCapabilities
 
 if TYPE_CHECKING:
     from yuuagents.core.flow import Flow
-    from yuuagents.pool import AgentPool
-    from yuuagents.runtime_session import Session
 
 
 class DelegateDepthExceededError(RuntimeError):
@@ -40,9 +38,6 @@ class AgentContext:
     task_id: str
     agent_id: str
     workdir: str
-    pool: AgentPool | None = None
     capabilities: AgentCapabilities = field(factory=AgentCapabilities)
     delegate_depth: int = 0
-    session: Session | None = None
-    current_run_id: str = ""
     current_flow: Flow | None = None

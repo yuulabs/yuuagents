@@ -9,6 +9,7 @@ import yuutools as yt
 from loguru import logger
 
 from yuuagents.capabilities import DockerCapability, require_docker
+from yuuagents.core.flow import Flow
 
 _SOFT_TIMEOUT_PREFIX = "[SOFT_TIMEOUT] "
 
@@ -36,13 +37,15 @@ async def execute_bash(
     command: str,
     timeout: int = 120,
     soft_timeout: int | None = None,
-    session_id: str = yt.depends(lambda ctx: ctx.current_run_id or ctx.task_id),
     docker: DockerCapability = yt.depends(require_docker),
-    flow: Any = yt.depends(lambda ctx: ctx.current_flow),
+    flow: Flow[Any, str] | None = yt.depends(lambda ctx: ctx.current_flow),
 ) -> str:
+    if flow is None:
+        raise RuntimeError("execute_bash requires an active flow")
     timeout = max(1, min(timeout, 600))
     container = docker.container_id
     executor = docker.executor
+    session_id = flow.id
 
     if soft_timeout is None:
         return await executor.exec_terminal(
@@ -70,6 +73,20 @@ async def execute_bash(
     assert pending is not None
 
     while not pending.done:
+        while not flow.mailbox.empty():
+            try:
+                data = flow.mailbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            try:
+                await executor.write_terminal(
+                    container,
+                    session_id,
+                    data,
+                    append_newline=False,
+                )
+            except Exception:
+                logger.debug("mailbox input failed during bg wait")
         await asyncio.sleep(3)
         try:
             cap = await executor.capture_terminal(container, session_id)

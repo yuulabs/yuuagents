@@ -1,20 +1,34 @@
-"""delegate — run another configured agent and return its final response."""
+"""delegate — run another configured agent as a child flow."""
 
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import yuullm
 import yuutools as yt
 
-from yuuagents.context import (
-    DelegateDepthExceededError,
-)
-from yuuagents.capabilities import require_agent_pool
-from yuuagents.pool import AgentPool
+from yuuagents.capabilities import require_spawn_agent
+from yuuagents.context import DelegateDepthExceededError
+from yuuagents.core.flow import Agent, Flow, FlowState
 from yuuagents.input import HandoffInput
-from yuuagents.runtime_session import Session
-from yuuagents.types import AgentStatus
+
+
+def _content_items(message: yuullm.Message | None) -> list[yuullm.Item]:
+    if message is None:
+        return []
+    _, items = message
+    return [
+        item for item in items
+        if isinstance(item, dict) and item.get("type") in ("text", "image_url")
+    ]
+
+
+def _final_response(agent: Agent) -> yuullm.Message | None:
+    for message in reversed(agent.messages):
+        if message[0] == "assistant":
+            return message
+    return None
 
 
 @yt.tool(
@@ -26,8 +40,7 @@ from yuuagents.types import AgentStatus
     },
     description=(
         "Delegate work to another configured agent. "
-        "Builds a structured handoff input for the delegated agent. "
-        "Returns the delegated agent's final response."
+        "The child agent runs as a child flow beneath the current tool flow."
     ),
 )
 async def delegate(
@@ -35,13 +48,12 @@ async def delegate(
     context: str,
     task: str,
     tools: list[str] | None = None,
-    pool: AgentPool = yt.depends(require_agent_pool),
-    parent: Session | None = yt.depends(lambda ctx: ctx.session),
-    parent_run_id: str = yt.depends(lambda ctx: ctx.current_run_id),
+    spawn_agent: Any = yt.depends(require_spawn_agent),
+    current_flow: Flow[Any, Any] | None = yt.depends(lambda ctx: ctx.current_flow),
     delegate_depth: int = yt.depends(lambda ctx: ctx.delegate_depth),
 ) -> list[yuullm.Item] | str:
-    if parent is None:
-        raise RuntimeError("delegate requires an active parent session")
+    if current_flow is None:
+        raise RuntimeError("delegate requires an active flow")
 
     next_depth = delegate_depth + 1
     if next_depth > 3:
@@ -55,29 +67,33 @@ async def delegate(
         context=[yuullm.user(context.strip())] if context.strip() else [],
         task=[yuullm.user(task.strip())] if task.strip() else [],
     )
-    child = await pool.spawn(
-        parent=parent,
-        parent_run_id=parent_run_id,
-        agent=agent,
-        input=handoff_input,
-        tools=tools,
-        delegate_depth=next_depth,
+    child: Agent = await spawn_agent(
+        current_flow,
+        agent,
+        handoff_input,
+        tools,
+        next_depth,
     )
+
+    wait_task = asyncio.create_task(child.flow.wait())
     try:
-        async for _step in child.step_iter():
-            pass
-        child.status = AgentStatus.DONE
+        while not wait_task.done():
+            while not current_flow.mailbox.empty():
+                child.send(current_flow.mailbox.get_nowait())
+            await asyncio.sleep(0.05)
+        await wait_task
     except asyncio.CancelledError:
-        child.status = AgentStatus.CANCELLED
+        child.flow.cancel()
+        try:
+            await child.flow.wait()
+        except asyncio.CancelledError:
+            pass
         raise
-    except Exception:
-        child.status = AgentStatus.ERROR
-    response = child.final_response()
-    if response is None:
-        return "[delegate] agent produced no response"
-    _, items = response
-    content: list[yuullm.Item] = [
-        item for item in items
-        if isinstance(item, dict) and item.get("type") in ("text", "image_url")
-    ]
-    return content if content else "[delegate] agent produced no output"
+
+    if child.flow.state is FlowState.ERROR:
+        raise RuntimeError(str(child.flow.info.get("error", "delegated agent failed")))
+    if child.flow.state is FlowState.CANCELLED:
+        raise RuntimeError("delegated agent cancelled")
+
+    items = _content_items(_final_response(child))
+    return items if items else "[delegate] agent produced no output"

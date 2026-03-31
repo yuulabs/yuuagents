@@ -1,363 +1,84 @@
 # yuuagents
 
-A minimal Python agent runtime. Write a one-liner or deploy a persistent daemon — same codebase, two paths.
+A minimal Python agent runtime built around a single runtime core: `Flow`.
 
 ```
-Agent = Persona + Tools + LLM
+Flow = observable execution + mailbox + cancellation
+Agent = LLM loop on top of Flow
+Basin = live-flow index
+TaskHost = SDK-first host API
 ```
 
-> **Quick links** · [SDK path](#sdk-path-local) · [Service path](#service-path-daemon) · [Flow concept](#the-flow-abstraction) · [Built-in tools](#built-in-tools) · [Config reference](#configuration)
+## Architecture
 
----
+`Flow` is the only runtime object that matters.
 
-## Two Ways to Run
+- `Flow` records what happened, owns a mailbox, tracks parent/children, and can be cancelled or waited on.
+- `Agent` is the LLM executor attached to a root `Flow`.
+- `Deferred` is a `Flow` state, not a separate object type.
+- `Basin` indexes all live flows, not just roots.
+- `TaskHost` is the host-facing API for submit, status, history, inspect, wait, cancel, and persistence.
+- Daemon/CLI support is an adapter layer on top of `TaskHost`, not the core model.
 
-| | SDK Path | Service Path |
-|---|---|---|
-| **When to use** | Embed in your code, notebooks, pipelines | Long-running tasks, managed lifecycle, CLI access |
-| **Entry point** | `from yuuagents import run_once, Session` | `yagents up` |
-| **Persistence** | No (ephemeral) | Yes (SQLite snapshots) |
-| **Docker tools** | No | Yes (optional) |
-| **Daemon required** | No | Yes |
+## Persistence
 
----
+SDK-only users should be able to run the runtime without `yagents install`.
 
-## Install
+- In-process persistence should work without any daemon or socket.
+- Durable local persistence should be optional and pluggable.
+- The daemon adapter may use default disk locations and discovery files, but those are deployment conveniences, not runtime requirements.
 
-**Requirements:** Python 3.14+, and optionally Docker Engine for sandboxed tool execution.
+## Core Model
 
-```bash
-pip install yuuagents
+```
+TaskHost
+├── Basin
+│   ├── flow lookup by id
+│   ├── live flow registry
+│   └── flow-level inspect / wait / cancel
+└── Persistence
+    ├── in-memory for SDK use
+    └── optional disk-backed storage
+
+Agent
+├── root Flow
+├── messages / usage / rounds
+└── tool execution on child Flows
 ```
 
-Optional extras:
+## Flow Semantics
 
-```bash
-pip install 'yuuagents[docker]'   # execute_bash, read_file, edit_file, delete_file
-pip install 'yuuagents[web]'      # web_search (requires Tavily API key)
-pip install 'yuuagents[all]'      # everything
-```
+`Flow` is the execution topology.
 
----
+- Each flow has an `id`, `kind`, `info`, `stem`, `mailbox`, `children`, and optional parent link.
+- `send(content)` accepts `str`, `Item`, or `list[Item]`.
+- The meaning of `send` is flow-specific and follows dependency inversion: different flow kinds interpret the same content differently.
+- A deferred flow continues running and may later notify its parent through the mailbox.
 
-## SDK Path (Local)
+## Host API
 
-Run an agent in-process. No daemon, no Docker, no database.
-
-### 30-second quickstart
+`TaskHost` is the main service boundary for both SDK and daemon usage.
 
 ```python
-import asyncio
-import yuullm
-from yuuagents import run_once
+host = TaskHost(basin=basin, persistence=persistence, root_factory=root_factory)
 
-async def main():
-    llm = yuullm.YLLMClient(
-        provider="openai",
-        api_key_env="OPENAI_API_KEY",
-        default_model="gpt-4o-mini",
-    )
-    result = await run_once("Summarise the Zen of Python.", llm=llm)
-    print(result.output_text)
-
-asyncio.run(main())
+task_id = await host.submit(spec)
+info = await host.status(task_id)
+history = await host.history(task_id)
+await host.wait(task_id)
+await host.cancel(task_id)
 ```
 
-### Stateful agent with streaming
+This is the level that should remain stable. CLI and HTTP are projections of this API.
 
-```python
-from uuid import uuid4
-import yuutools as yt
-from yuuagents import AgentConfig, AgentContext, Session, LocalRun
-from yuuagents.input import conversation_input_from_text
+## Built-in Tool Families
 
-config = AgentConfig(agent_id="coder", llm=llm, system="You are a concise coding assistant.")
-ctx = AgentContext(task_id=uuid4().hex, agent_id="coder", workdir=".")
-session = Session(config=config, context=ctx)
-agent_input = conversation_input_from_text("List the files in the current directory.")
-session.start(agent_input)
+- `delegate`: create a child agent flow through the host/runtime boundary.
+- `execute_bash`: create an interactive terminal flow when Docker is available.
+- `inspect_background`, `wait_background`, `cancel_background`, `input_background`, `defer_background`: host-level operations over live flow ids.
+- `web_search`, `read_file`, `edit_file`, `delete_file`, `sleep`, `view_image`: ordinary tools that do not require host-level control.
 
-run = LocalRun(session=session, input=agent_input)
-async for step in run.step_iter():
-    print(f"round {step.rounds}  tokens={step.tokens}")
+## Design Notes
 
-result = await run.result()
-print(result.output_text)
-```
-
-### With custom tools
-
-```python
-import yuutools as yt
-from yuuagents import run_once
-
-@yt.tool(description="Return the current UTC time.")
-async def now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
-
-result = await run_once("What time is it?", llm=llm, tools=[now])
-print(result.output_text)
-```
-
-### Multi-agent (delegate tool)
-
-```python
-from yuuagents import AgentConfig, AgentContext, AgentPool, Session, LocalRun
-from yuuagents.input import AgentInput, conversation_input_from_text
-from yuuagents.tools import get as get_builtin_tools
-from uuid import uuid4
-import yuutools as yt
-
-worker_config = AgentConfig(
-    agent_id="worker", llm=llm, system="You are a specialist.",
-    tools=yt.ToolManager(),
-)
-agent_configs = {"worker": worker_config}
-
-pool: AgentPool  # forward reference for session_builder closure
-
-async def session_builder(
-    *, parent: Session, task_id: str, parent_run_id: str,
-    agent: str, input: AgentInput, tools: list[str] | None, delegate_depth: int,
-) -> Session:
-    config = agent_configs[agent]
-    ctx = AgentContext(
-        task_id=task_id, agent_id=agent,
-        workdir=parent.context.workdir, pool=pool,
-        delegate_depth=delegate_depth,
-    )
-    session = Session(config=config, context=ctx)
-    session.start(input)
-    return session
-
-pool = AgentPool(session_builder=session_builder)
-
-orch_config = AgentConfig(
-    agent_id="orchestrator", llm=llm, system="Delegate to worker.",
-    tools=yt.ToolManager(get_builtin_tools(["delegate", "wait_background"])),
-)
-ctx = AgentContext(task_id=uuid4().hex, agent_id="orchestrator", workdir=".", pool=pool)
-session = Session(config=orch_config, context=ctx)
-agent_input = conversation_input_from_text("Do the task.")
-session.start(agent_input)
-result = await LocalRun(session=session, input=agent_input).result()
-print(result.output_text)
-```
-
----
-
-## Service Path (Daemon)
-
-The daemon manages long-running tasks over a Unix socket, persists snapshots to SQLite, and optionally runs tools inside Docker containers.
-
-### Step 1 — Bootstrap
-
-```bash
-yagents install
-```
-
-Writes `~/.yagents/config.yaml`, initialises the task database, and pulls the Docker runtime image (if Docker-backed tools are configured).
-
-### Step 2 — Start
-
-```bash
-yagents up -d        # background process or systemd user service
-```
-
-### Step 3 — Run tasks
-
-```bash
-# Submit a task
-yagents run --agent main --task "Refactor src/util.py to use pathlib"
-
-# Check status
-yagents list
-yagents status <task_id>
-
-# Read the output
-yagents logs <task_id>
-
-# Send a follow-up message to a running task
-yagents input <task_id> "Focus on the read_text calls first."
-
-# Cancel
-yagents stop <task_id>
-```
-
-### Full CLI reference
-
-| Command | Description |
-|---|---|
-| `yagents install` | Bootstrap config, directories, database, Docker image |
-| `yagents up [-d]` | Start daemon (`-d` = background / systemd) |
-| `yagents down` | Stop daemon |
-| `yagents run --agent <id> --task "..."` | Submit a task |
-| `yagents list` | Human-readable task list |
-| `yagents status <task_id>` | JSON status for one task |
-| `yagents logs <task_id>` | Conversation history by role |
-| `yagents input <task_id> "..."` | Send a message to a running task |
-| `yagents stop <task_id>` | Cancel a running task |
-| `yagents config` | Show current resolved config |
-| `yagents config --overrides FILE` | Merge overrides and hot-reload |
-| `yagents config --config FILE` | Replace config and hot-reload |
-| `yagents trace ui` | Open the yuutrace observability UI |
-| `yagents uninstall` | Remove all installed runtime state |
-
-`yagents run` also accepts `--persona`, `--tools`, `--model`, `--container`, `--image`.
-
----
-
-## The Flow Abstraction
-
-Everything that executes inside yuuagents is a **Flow** — a generic container that is observable, addressable, and cancellable.
-
-```
-Flow
-├── stem          append-only event log   (what happened)
-├── mailbox       async message queue     (what to do next)
-├── children      list[Flow]              (spawned sub-flows)
-└── cancel()      propagates recursively  (stop everything)
-```
-
-An **Agent** is a specialised Flow that drives the LLM turn loop:
-
-```
-Agent (a Flow)
-├── AgentConfig   llm + tools + system prompt   (frozen, immutable)
-├── messages      conversation history
-└── steps()       AsyncGenerator[StepResult]    (call this to run)
-```
-
-At each turn, `steps()`:
-1. Calls the LLM (streaming)
-2. Executes any tool calls (optionally in Docker, optionally deferred to background)
-3. Emits a `StepResult` and loops until the model stops
-
-Sub-agents spawned via the `delegate` tool become **child Flows** of the parent — inheriting cancellation and sharing the observable event tree.
-
-### Snapshots
-
-A Flow can be frozen into an `AgentState` at any point:
-
-```python
-state = await session.snapshot()   # messages + usage + rounds
-# ... persist to disk, restart daemon, restore ...
-session.resume(history=state.messages, conversation_id=state.conversation_id)
-```
-
-Snapshot-based recovery is configured under `snapshot:` in `config.yaml`.
-
----
-
-## Built-in Tools
-
-| Tool | Requires | Description |
-|---|---|---|
-| `sleep` | — | Pause execution |
-| `view_image` | — | Decode and display an image |
-| `execute_bash` | `docker` extra + Docker | Run shell commands in a container |
-| `read_file` | `docker` extra + Docker | Read a file from the container workspace |
-| `edit_file` | `docker` extra + Docker | Patch a file in the container workspace |
-| `delete_file` | `docker` extra + Docker | Delete a file from the container workspace |
-| `web_search` | `web` extra + Tavily API key | Search the web |
-| `delegate` | `AgentPool` with `session_builder` | Spawn a sub-agent |
-| `inspect_background` | `AgentPool` | Inspect a running sub-agent or tool flow |
-| `cancel_background` | `AgentPool` | Cancel a running sub-agent or tool flow |
-| `input_background` | `AgentPool` | Send input to a background run |
-| `defer_background` | `AgentPool` | Signal a delegated agent to move work to background |
-| `wait_background` | `AgentPool` | Block until one or more background runs finish |
-
----
-
-## Configuration
-
-State lives under `~/.yagents/` by default:
-
-```
-~/.yagents/
-├── config.yaml         active config
-├── tasks.sqlite3       task log and snapshots
-├── traces.db           LLM traces (yuutrace)
-├── yagents.sock        Unix socket
-└── dockers/            per-container working directories
-```
-
-Key sections in `config.yaml`:
-
-```yaml
-snapshot:
-  enabled: false           # write AgentState snapshots after each turn
-  restore_on_start: false  # auto-resume incomplete tasks on daemon startup
-
-daemon:
-  socket: ~/.yagents/yagents.sock
-  log_level: info
-
-docker:
-  image: yuuagents-runtime:latest
-
-providers:
-  openai-default:
-    api_type: openai-chat-completion
-    api_key_env: OPENAI_API_KEY
-    default_model: gpt-4o
-
-agents:
-  main:
-    description: Default general-purpose agent.
-    provider: openai-default
-    model: gpt-4o
-    persona: "You are a careful, concise assistant."
-    tools:
-      - sleep
-      - view_image
-```
-
-Copy `config.example.yaml` and `config.overrides.example.yaml` from the source repo for the full annotated reference.
-
-Config resolution order (highest wins):
-
-1. Bundled package default template
-2. `config.overrides.yaml` in the current working directory
-3. `config.overrides.yaml` from `--project-dir`
-4. `--overrides FILE` flag
-5. `--config FILE` flag (replaces the default template entirely)
-
----
-
-## Architecture Overview
-
-```
-  SDK path  ──────▶  Session / run_once()
-                     AgentPool (multi-agent, session_builder)
-                              │
-                    ┌─────────▼───────────────────────────┐
-                    │  core/flow.py                       │
-                    │  Flow  ◀──── Agent                  │
-                    │  (observable · addressable ·        │
-                    │   interruptible execution unit)     │
-                    └──────────────┬──────────────────────┘
-                                   │
-  Service   ┌────────────────────┐ │ ┌──────────────────────┐
-  path  ───▶│  CLI (yagents)     │─┼─│  Daemon (Starlette)  │
-            │  click commands    │ │ │  AgentManager        │
-            │  HTTP/Unix socket  │ │ │  DockerManager       │
-            └────────────────────┘   └──────────────────────┘
-```
-
-**Package dependencies:** `yuuagents → {yuullm, yuutools, yuutrace}`
-
----
-
-## Development
-
-```bash
-uv sync
-uv run pytest
-uv run ruff check src/ tests/
-uv run mypy src/
-uv build
-```
-
-Tests marked `@pytest.mark.live` require real external services and are skipped by default.
+- Root flow id should be the task id.
+- The implementation should prefer one truth source for runtime state, not mirrored host-side caches.

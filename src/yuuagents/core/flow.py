@@ -13,9 +13,10 @@ No inheritance between Flow and Agent.
 from __future__ import annotations
 
 import asyncio
+import enum
 import json
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 from uuid import UUID, uuid4
 
 import attrs
@@ -37,6 +38,7 @@ from yuuagents.types import StepResult
 
 S = TypeVar("S")
 M = TypeVar("M")
+Content: TypeAlias = str | yuullm.Item | list[yuullm.Item]
 
 
 # ---------------------------------------------------------------------------
@@ -188,9 +190,18 @@ def render_agent_event(event: AgentEvent) -> str:
 class FlowTree(msgspec.Struct, frozen=True):
     flow_id: str
     kind: str
+    state: str
     info: dict[str, Any]
     stem: tuple[Any, ...]
     children: tuple["FlowTree", ...]
+
+
+class FlowState(str, enum.Enum):
+    RUNNING = "running"
+    DEFERRED = "deferred"
+    DONE = "done"
+    ERROR = "error"
+    CANCELLED = "cancelled"
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +215,9 @@ class Flow(Generic[S, M]):
 
     id: str = field(factory=lambda: uuid4().hex)
     kind: str = "flow"
+    parent: Flow[Any, Any] | None = None
     info: dict[str, Any] = field(factory=dict)
+    state: FlowState = FlowState.RUNNING
     stem: list[S] = field(factory=list)
     mailbox: asyncio.Queue[M] = field(factory=asyncio.Queue)
     children: list[Flow[Any, Any]] = field(factory=list, init=False)
@@ -219,10 +232,26 @@ class Flow(Generic[S, M]):
         self.mailbox.put_nowait(msg)
 
     def start(self, coro: Coroutine[Any, Any, Any]) -> None:
-        self._task = asyncio.create_task(coro, name=f"{self.kind}-{self.id}")
+        self.state = FlowState.RUNNING
+
+        async def _runner() -> Any:
+            try:
+                result = await coro
+            except asyncio.CancelledError:
+                self.state = FlowState.CANCELLED
+                raise
+            except Exception:
+                self.state = FlowState.ERROR
+                raise
+            else:
+                if self.state in (FlowState.RUNNING, FlowState.DEFERRED):
+                    self.state = FlowState.DONE
+                return result
+
+        self._task = asyncio.create_task(_runner(), name=f"{self.kind}-{self.id}")
 
     def spawn(self, kind: str) -> Flow[Any, Any]:
-        child: Flow[Any, Any] = Flow(kind=kind)
+        child: Flow[Any, Any] = Flow(kind=kind, parent=self)
         self.children.append(child)
         return child
 
@@ -242,10 +271,12 @@ class Flow(Generic[S, M]):
         The flow's task keeps running; the agent will pick up the
         final result via ``_bg_finish``.
         """
+        self.state = FlowState.DEFERRED
         self._defer_partial = partial or None
         self._defer_requested.set()
 
     def cancel(self) -> None:
+        self.state = FlowState.CANCELLED
         if self._task and not self._task.done():
             self._task.cancel()
         for child in self.children:
@@ -268,6 +299,7 @@ class Flow(Generic[S, M]):
         return FlowTree(
             self.id,
             self.kind,
+            self.state.value,
             dict(self.info),
             tuple(self.stem),
             tuple(child.inspect() for child in self.children),
@@ -285,11 +317,12 @@ class Agent:
 
     config: AgentConfig
     ctx: AgentContext
+    flow_id: str | None = None
     conversation_id: UUID | None = None
     initial_messages: list[yuullm.Message] = field(factory=list)
     startup_input: AgentInput | None = None
 
-    flow: Flow[AgentEvent, yuullm.Message] = field(init=False)
+    flow: Flow[AgentEvent, Content] = field(init=False)
     messages: list[yuullm.Message] = field(factory=list, init=False)
     total_tokens: int = field(default=0, init=False)
     last_usage: yuullm.Usage | None = field(default=None, init=False)
@@ -297,13 +330,16 @@ class Agent:
     last_cost_usd: float = field(default=0.0, init=False)
     total_cost_usd: float = field(default=0.0, init=False)
     rounds: int = field(default=0, init=False)
-    _defer: asyncio.Event = field(factory=asyncio.Event, init=False)
     _chat: ytrace.ConversationContext | None = field(default=None, init=False)
     _bg_tasks: dict[str, _BgTaskInfo] = field(factory=dict, init=False)
 
     def start(self, startup_input: AgentInput | None = None) -> None:
         """Create the flow and register the structured startup input."""
-        self.flow = Flow(kind="agent")
+        self.flow = Flow(kind="agent", id=self.flow_id or uuid4().hex)
+        self._register_flow(self.flow)
+        self.flow.info["task_id"] = self.ctx.task_id
+        self.flow.info["agent_id"] = self.ctx.agent_id
+        self.flow.info["workdir"] = self.ctx.workdir
         if startup_input is not None:
             self.startup_input = startup_input
         if self.startup_input is None and not self.initial_messages:
@@ -314,10 +350,23 @@ class Agent:
                 self.startup_input,
             )
 
-    def send(self, msg: yuullm.Message, *, defer_tools: bool = False) -> None:
-        self.flow.send(msg)
+    def _register_flow(self, flow: Flow[Any, Any]) -> None:
+        basin = self.ctx.capabilities.basin
+        if basin is not None:
+            basin.register(flow)
+
+    def send(
+        self,
+        content: Content | yuullm.Message,
+        *,
+        defer_tools: bool = False,
+    ) -> None:
+        self.flow.send(content)
         if defer_tools:
-            self._defer.set()
+            self.flow.request_defer()
+
+    def request_defer(self, partial: str = "") -> None:
+        self.flow.request_defer(partial)
 
     def inspect(self) -> FlowTree:
         return self.flow.inspect()
@@ -585,7 +634,7 @@ class Agent:
         child: Flow[Any, Any],
         span: ytrace.ToolSpan | None,
     ) -> yuullm.Message:
-        ctx = attrs.evolve(self.ctx, current_run_id=child.id, current_flow=child)
+        ctx = attrs.evolve(self.ctx, current_flow=child)
         bound = self.config.tools[tc.name].bind(ctx)
         try:
             result = await bound.run(**kwargs)
@@ -616,6 +665,9 @@ class Agent:
         for tc in tool_calls:
             child = self.flow.spawn("tool")
             child.info["tool_name"] = tc.name
+            child.info["task_id"] = self.ctx.task_id
+            child.info["workdir"] = self.ctx.workdir
+            self._register_flow(child)
             span: ytrace.ToolSpan | None = None
             try:
                 kwargs = _load_tool_kwargs(tc)
@@ -644,7 +696,7 @@ class Agent:
         pending: set[asyncio.Task[Any]] = {
             task for _, _, task, _ in tasks.values()
         }
-        defer_task: asyncio.Task[Any] = asyncio.create_task(self._defer.wait())
+        defer_task: asyncio.Task[Any] = asyncio.create_task(self.flow._defer_requested.wait())
 
         # Optional batch-level timeout
         timeout_task: asyncio.Task[Any] | None = None
@@ -688,7 +740,7 @@ class Agent:
 
         if not defer_task.done():
             defer_task.cancel()
-        self._defer.clear()
+        self.flow._defer_requested.clear()
         if timeout_task is not None and not timeout_task.done():
             timeout_task.cancel()
         for cdt in child_defer_tasks:
@@ -762,7 +814,7 @@ class Agent:
         text = f"[bg:{run_id}] {result_text}"
         if self._chat is not None:
             self._chat.user(text)
-        self.flow.send(yuullm.user(text))
+        self.flow.send(text)
         self._bg_tasks.pop(call_id, None)
 
     def _accept_messages(self, messages: list[yuullm.Message]) -> None:
@@ -782,8 +834,8 @@ class Agent:
         """Drain pending messages from the mailbox. Returns True if any were drained."""
         drained = False
         while not self.flow.mailbox.empty():
-            msg: yuullm.Message = self.flow.mailbox.get_nowait()
-            self._accept_message(msg)
+            content = self.flow.mailbox.get_nowait()
+            self._accept_message(_content_to_message(content))
             drained = True
         return drained
 
@@ -881,6 +933,18 @@ def _trace_items_for_log(reasoning_items: list[str], assistant_items: list[Any])
 def _msg_text(msg: yuullm.Message) -> str:
     """Extract display text from a yuullm.Message."""
     return render_message_text(msg)
+
+
+def _content_to_message(content: Content | yuullm.Message) -> yuullm.Message:
+    if isinstance(content, str):
+        return yuullm.user(content)
+    if isinstance(content, tuple) and len(content) == 2:
+        return content
+    if isinstance(content, list):
+        return yuullm.user(content)
+    if isinstance(content, dict):
+        return yuullm.user([content])
+    raise TypeError(f"unsupported flow content type: {type(content).__name__}")
 
 
 def _coerce_tool_output(result: Any, call_id: str) -> yuullm.Message:

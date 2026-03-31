@@ -117,13 +117,6 @@ async def run_agent(agent: Agent) -> None:
             pass
 
 
-async def run_session(session) -> None:
-    """Run all session steps to completion."""
-    async with aclosing(session.step_iter()) as gen:
-        async for _ in gen:
-            pass
-
-
 def conversation_input(*messages: yuullm.Message) -> ConversationInput:
     return ConversationInput(messages=list(messages))
 
@@ -257,54 +250,6 @@ async def test_agent_merges_streamed_text_chunks_before_persisting_history():
 
 
 @pytest.mark.asyncio
-async def test_session_exposes_last_and_total_usage_and_cost():
-    """Session should sync structured last/total usage + cost to host-facing state."""
-    from yuuagents.agent import AgentConfig
-    from yuuagents.context import AgentContext
-    from yuuagents.runtime_session import Session
-
-    usage = yuullm.Usage(
-        provider="fake",
-        model="fake-model",
-        input_tokens=11,
-        output_tokens=7,
-        total_tokens=18,
-    )
-    cost = yuullm.Cost(
-        input_cost=0.0011,
-        output_cost=0.0007,
-        total_cost=0.0018,
-    )
-    client = make_client(
-        [[yuullm.Response(item={"type": "text", "text": "done"})]],
-        stores=[yuullm.Store(usage=usage, cost=cost)],
-    )
-    manager: yt.ToolManager = yt.ToolManager()
-    session = Session(
-        config=AgentConfig(
-            agent_id="host-facing",
-            tools=manager,
-            llm=client,
-            system="",
-        ),
-        context=AgentContext(
-            task_id="task-1",
-            agent_id="host-facing",
-            workdir="",
-        ),
-    )
-
-    session.start(user_input("hello"))
-    await run_session(session)
-
-    assert session.last_usage == usage
-    assert session.total_usage == usage
-    assert session.last_cost_usd == pytest.approx(cost.total_cost)
-    assert session.total_cost_usd == pytest.approx(cost.total_cost)
-    assert session.total_tokens == 18
-
-
-@pytest.mark.asyncio
 async def test_llm_usage_and_cost_are_recorded_on_conversation_span():
     usage = yuullm.Usage(
         provider="fake",
@@ -354,107 +299,6 @@ async def test_llm_usage_and_cost_are_recorded_on_conversation_span():
     assistant_events = [ev["name"] for ev in assistant_turns[0]["events"]]
     assert "yuu.llm.usage" in assistant_events
     assert "yuu.cost" in assistant_events
-
-
-@pytest.mark.asyncio
-async def test_session_resume_preserves_conversation_id():
-    from uuid import UUID
-
-    from yuuagents.agent import AgentConfig
-    from yuuagents.context import AgentContext
-    from yuuagents.runtime_session import Session
-
-    client = make_client(
-        [
-            [yuullm.Response(item={"type": "text", "text": "first"})],
-            [yuullm.Response(item={"type": "text", "text": "second"})],
-        ]
-    )
-    manager: yt.ToolManager = yt.ToolManager()
-    session = Session(
-        config=AgentConfig(
-            agent_id="host-facing",
-            tools=manager,
-            llm=client,
-            system="system prompt",
-        ),
-        context=AgentContext(
-            task_id="task-1",
-            agent_id="host-facing",
-            workdir="",
-        ),
-    )
-
-    session.start(user_input("hello"))
-    await run_session(session)
-    first_conversation_id = session.conversation_id
-
-    resumed = Session(config=session.config, context=session.context)
-    resumed.resume(
-        user_input("followup"),
-        history=session.history,
-        conversation_id=first_conversation_id,
-    )
-    await run_session(resumed)
-
-    assert isinstance(first_conversation_id, UUID)
-    assert resumed.conversation_id == first_conversation_id
-
-
-@pytest.mark.asyncio
-async def test_resume_trace_records_system_and_tools():
-    from yuuagents.agent import AgentConfig
-    from yuuagents.context import AgentContext
-    from yuuagents.runtime_session import Session
-
-    @yt.tool()
-    async def ping() -> str:
-        """Return a fixed value."""
-        return "pong"
-
-    store = ytrace.init_memory()
-    manager: yt.ToolManager = yt.ToolManager()
-    manager.register(ping)
-    client = make_client(
-        [
-            [yuullm.Response(item={"type": "text", "text": "first"})],
-            [yuullm.Response(item={"type": "text", "text": "second"})],
-        ]
-    )
-    config = AgentConfig(
-        agent_id="host-facing",
-        tools=manager,
-        llm=client,
-        system="system prompt",
-    )
-    context = AgentContext(
-        task_id="task-1",
-        agent_id="host-facing",
-        workdir="",
-    )
-
-    first = Session(config=config, context=context)
-    first.start(user_input("hello"))
-    await run_session(first)
-
-    resumed = Session(config=config, context=context)
-    resumed.resume(
-        user_input("followup"),
-        history=first.history,
-        conversation_id=first.conversation_id,
-    )
-    await run_session(resumed)
-
-    spans = store.get_all_spans()
-    conv_spans = [
-        span for span in spans
-        if span["name"] == "conversation"
-        and span["conversation_id"] == str(first.conversation_id)
-    ]
-    assert conv_spans
-    attrs = conv_spans[-1]["attributes"]
-    assert attrs["yuu.context.system.persona"] == "system prompt"
-    assert "ping" in attrs["yuu.context.system.tools"]
 
 
 # ---------------------------------------------------------------------------
@@ -803,42 +647,6 @@ async def test_steps_host_break_preserves_history():
 
 
 @pytest.mark.asyncio
-async def test_steps_session_host_break_syncs():
-    """Session.step_iter() syncs history even on early break."""
-    from yuuagents.agent import AgentConfig
-    from yuuagents.context import AgentContext
-    from yuuagents.runtime_session import Session
-
-    @yt.tool()
-    async def noop() -> str:
-        """Do nothing."""
-        return "ok"
-
-    manager: yt.ToolManager = yt.ToolManager()
-    manager.register(noop)
-
-    script = [
-        [yuullm.ToolCall(id="tc1", name="noop", arguments="{}")],
-        [yuullm.ToolCall(id="tc2", name="noop", arguments="{}")],
-        [yuullm.Response(item={"type": "text", "text": "done"})],
-    ]
-    client = make_client(script)
-    session = Session(
-        config=AgentConfig(agent_id="test", tools=manager, llm=client),
-        context=AgentContext(task_id="t1", agent_id="test", workdir=""),
-    )
-    session.start(user_input("Go"))
-
-    async with aclosing(session.step_iter()) as gen:
-        async for step in gen:
-            if not step.done:
-                break
-
-    # History is synced even though we broke early
-    assert len(session.history) >= 3
-
-
-@pytest.mark.asyncio
 async def test_tool_batch_timeout():
     """tool_batch_timeout defers slow tools to background instead of cancelling."""
 
@@ -1130,7 +938,7 @@ def test_delegate_no_dual_iteration():
 def test_delegate_exception_not_swallowed():
     """delegate tool catches Exception but re-raises CancelledError."""
     from pathlib import Path
-    source = Path("src/yuuagents/tools/delegate.py").read_text()
+    source = (Path(__file__).resolve().parents[1] / "src/yuuagents/tools/delegate.py").read_text()
     # Verify the source does NOT contain `except BaseException`
     assert "except BaseException" not in source
     # Verify it contains `except asyncio.CancelledError` (re-raise pattern)
