@@ -1,6 +1,6 @@
 [project]
 name = "yuuagents"
-version = "0.1.2"
+version = "0.2.0"
 description = "Agent runtime with SDK imports, bundled CLI, optional daemon bootstrap, and built-in tools"
 readme = "README.md"
 license = "MIT"
@@ -20,7 +20,7 @@ classifiers = [
 dependencies = [
     # Internal
     "yuutools>=0.1.0",
-    "yuullm>=0.3.1", #big api change.
+    "yuullm>=0.7.0",
     "yuutrace>=0.1.8", #big api change
     # Data & types
     "attrs>=24.2.0",
